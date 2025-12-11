@@ -1,0 +1,217 @@
+// GitHub Productivity Trends - Database Schema
+// SQLite for MVP, can migrate to PostgreSQL later
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ========== Sampled GitHub Users ==========
+
+model SampledUser {
+  id                 String   @id @default(uuid())
+  githubId           Int      @unique
+  username           String   @unique
+  tier               String   // "top", "mid", "casual"
+  avatarUrl          String?
+  profileUrl         String?
+  publicRepos        Int      @default(0)
+  followers          Int      @default(0)
+  totalContributions Int      @default(0)
+  primaryLanguage    String?
+
+  lastSyncedAt       DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  commitMetrics            CommitMetrics[]
+  prMetrics                PRMetrics[]
+  userContributionMetrics  UserContributionMetrics[]
+}
+
+// ========== Sampled Repositories ==========
+
+model SampledRepo {
+  id              String   @id @default(uuid())
+  githubId        Int      @unique
+  fullName        String   @unique  // owner/repo format
+  name            String
+  owner           String
+  description     String?
+  primaryLanguage String
+  stars           Int      @default(0)
+  forks           Int      @default(0)
+  openIssues      Int      @default(0)
+
+  lastSyncedAt    DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  commitMetrics   CommitMetrics[]
+  prMetrics       PRMetrics[]
+  issueMetrics    IssueMetrics[]
+}
+
+// ========== Commit Metrics (Daily) ==========
+
+model CommitMetrics {
+  id            String   @id @default(uuid())
+  date          DateTime // Daily granularity
+
+  userId        String?
+  user          SampledUser? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  repoId        String?
+  repo          SampledRepo? @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  language      String?
+
+  commitCount   Int      @default(0)
+  linesAdded    Int      @default(0)
+  linesRemoved  Int      @default(0)
+  filesChanged  Int      @default(0)
+
+  createdAt     DateTime @default(now())
+
+  @@unique([date, userId, repoId, language])
+  @@index([date])
+  @@index([userId])
+  @@index([repoId])
+  @@index([language])
+}
+
+// ========== PR Metrics (Daily) ==========
+
+model PRMetrics {
+  id               String   @id @default(uuid())
+  date             DateTime
+
+  userId           String?
+  user             SampledUser? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  repoId           String?
+  repo             SampledRepo? @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  language         String?
+
+  prsOpened        Int      @default(0)
+  prsMerged        Int      @default(0)
+  prsClosed        Int      @default(0)
+  avgTimeToMergeHrs Float?
+  avgReviewCycles  Float?
+  avgLinesPerPR    Float?
+
+  createdAt        DateTime @default(now())
+
+  @@unique([date, userId, repoId, language])
+  @@index([date])
+  @@index([userId])
+  @@index([repoId])
+  @@index([language])
+}
+
+// ========== Issue Metrics (Daily) ==========
+
+model IssueMetrics {
+  id               String   @id @default(uuid())
+  date             DateTime
+
+  repoId           String?
+  repo             SampledRepo? @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  language         String?
+
+  issuesOpened     Int      @default(0)
+  issuesClosed     Int      @default(0)
+  avgResolutionHrs Float?
+
+  createdAt        DateTime @default(now())
+
+  @@unique([date, repoId, language])
+  @@index([date])
+  @@index([repoId])
+  @@index([language])
+}
+
+// ========== Global Daily Metrics (Pre-computed Aggregations) ==========
+
+model GlobalDailyMetrics {
+  id                String   @id @default(uuid())
+  date              DateTime @unique
+
+  // Commit metrics
+  totalCommits      Int      @default(0)
+  avgCommitsPerUser Float    @default(0)
+  totalLinesAdded   Int      @default(0)
+  totalLinesRemoved Int      @default(0)
+  avgLinesPerCommit Float    @default(0)
+
+  // PR metrics
+  totalPRsOpened    Int      @default(0)
+  totalPRsMerged    Int      @default(0)
+  avgTimeToMergeHrs Float?
+
+  // Issue metrics
+  totalIssuesOpened Int      @default(0)
+  totalIssuesClosed Int      @default(0)
+  avgResolutionHrs  Float?
+
+  // Active counts
+  activeUsers       Int      @default(0)
+  activeRepos       Int      @default(0)
+
+  createdAt         DateTime @default(now())
+}
+
+// ========== API Response Cache ==========
+
+model APICache {
+  id           String   @id @default(uuid())
+  cacheKey     String   @unique
+  endpoint     String
+  responseData String   // JSON string (SQLite doesn't have native JSON)
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([cacheKey])
+  @@index([expiresAt])
+}
+
+// ========== Sync Job Tracking ==========
+
+model SyncJob {
+  id                 String   @id @default(uuid())
+  jobType            String   // "users", "repos", "commits", "prs", "issues"
+  status             String   @default("pending") // pending, running, completed, failed
+  startedAt          DateTime?
+  completedAt        DateTime?
+  errorMessage       String?
+  itemsProcessed     Int      @default(0)
+  rateLimitRemaining Int?
+  createdAt          DateTime @default(now())
+
+  @@index([status])
+  @@index([jobType])
+}
+
+// ========== User Contribution Metrics (Daily from GitHub contribution calendar) ==========
+
+model UserContributionMetrics {
+  id                String   @id @default(uuid())
+  date              DateTime // Daily granularity
+
+  userId            String
+  user              SampledUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  contributionCount Int      @default(0) // Total contributions for that day
+
+  createdAt         DateTime @default(now())
+
+  @@unique([date, userId])
+  @@index([date])
+  @@index([userId])
+}
