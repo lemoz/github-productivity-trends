@@ -22,6 +22,7 @@ model SampledUser {
   publicRepos        Int      @default(0)
   followers          Int      @default(0)
   totalContributions Int      @default(0)
+  baselineContributions Int   @default(0) // 2020-2021 contributions
   primaryLanguage    String?
 
   lastSyncedAt       DateTime?
@@ -192,6 +193,8 @@ model SyncJob {
   errorMessage       String?
   itemsProcessed     Int      @default(0)
   rateLimitRemaining Int?
+  samplingSeed       Int?
+  samplingParams     String?  // JSON string for reproducibility
   createdAt          DateTime @default(now())
 
   @@index([status])

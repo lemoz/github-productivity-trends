@@ -12,18 +12,64 @@ import {
 } from "@/lib/github";
 import { TRACKED_LANGUAGES } from "@/types/metrics";
 
+const USER_BANDS: Array<{
+  tier: "top" | "mid" | "casual";
+  minFollowers: number;
+  maxFollowers: number | null;
+  target: number;
+}> = [
+  { tier: "top", minFollowers: 10000, maxFollowers: null, target: 100 },
+  { tier: "top", minFollowers: 5000, maxFollowers: 10000, target: 100 },
+  { tier: "mid", minFollowers: 2000, maxFollowers: 5000, target: 100 },
+  { tier: "mid", minFollowers: 1000, maxFollowers: 2000, target: 100 },
+  { tier: "mid", minFollowers: 500, maxFollowers: 1000, target: 100 },
+  { tier: "casual", minFollowers: 300, maxFollowers: 500, target: 100 },
+  { tier: "casual", minFollowers: 200, maxFollowers: 300, target: 100 },
+  { tier: "casual", minFollowers: 150, maxFollowers: 200, target: 100 },
+  { tier: "casual", minFollowers: 100, maxFollowers: 150, target: 100 },
+  { tier: "casual", minFollowers: 50, maxFollowers: 100, target: 100 },
+];
+
+const BASELINE_YEARS = [2020, 2021] as const;
+const baselineMinRaw = Number(process.env.BASELINE_MIN_CONTRIBUTIONS ?? 50);
+const BASELINE_MIN_CONTRIBUTIONS = Number.isFinite(baselineMinRaw)
+  ? baselineMinRaw
+  : 50;
+const seedRaw = Number(process.env.SAMPLING_SEED ?? 42);
+const DEFAULT_SAMPLING_SEED = Number.isFinite(seedRaw) ? seedRaw : 42;
+
 // POST /api/sync - Trigger data collection
 export async function POST(request: Request) {
   const { searchParams } = new URL(request.url);
   const type = searchParams.get("type") || "all"; // users, repos, all
+  const seedParam = searchParams.get("seed");
+  const samplingSeedRaw = seedParam ? Number(seedParam) : DEFAULT_SAMPLING_SEED;
+  const samplingSeed = Number.isFinite(samplingSeedRaw)
+    ? samplingSeedRaw
+    : DEFAULT_SAMPLING_SEED;
 
   try {
+    const samplingParams =
+      type === "users" || type === "all"
+        ? JSON.stringify({
+            baselineYears: BASELINE_YEARS,
+            baselineMinContributions: BASELINE_MIN_CONTRIBUTIONS,
+            bands: USER_BANDS,
+            perPage: 100,
+            pagesPerOrder: 2,
+            orders: ["desc", "asc"],
+          })
+        : null;
+
     // Create sync job
     const job = await prisma.syncJob.create({
       data: {
         jobType: type,
         status: "running",
         startedAt: new Date(),
+        samplingSeed:
+          type === "users" || type === "all" ? samplingSeed : null,
+        samplingParams,
       },
     });
 
@@ -31,7 +77,7 @@ export async function POST(request: Request) {
 
     // Sync users
     if (type === "users" || type === "all") {
-      itemsProcessed += await syncUsers();
+      itemsProcessed += await syncUsers(samplingSeed);
     }
 
     // Sync repos
@@ -100,32 +146,20 @@ export async function GET() {
 }
 
 // Sample users across tiers - 1000 users total
-async function syncUsers(): Promise<number> {
-  const bandSpecs: Array<{
-    tier: "top" | "mid" | "casual";
-    minFollowers: number;
-    maxFollowers: number | null;
-    target: number;
-  }> = [
-    { tier: "top", minFollowers: 10000, maxFollowers: null, target: 100 },
-    { tier: "top", minFollowers: 5000, maxFollowers: 10000, target: 100 },
-    { tier: "mid", minFollowers: 2000, maxFollowers: 5000, target: 100 },
-    { tier: "mid", minFollowers: 1000, maxFollowers: 2000, target: 100 },
-    { tier: "mid", minFollowers: 500, maxFollowers: 1000, target: 100 },
-    { tier: "casual", minFollowers: 300, maxFollowers: 500, target: 100 },
-    { tier: "casual", minFollowers: 200, maxFollowers: 300, target: 100 },
-    { tier: "casual", minFollowers: 150, maxFollowers: 200, target: 100 },
-    { tier: "casual", minFollowers: 100, maxFollowers: 150, target: 100 },
-    { tier: "casual", minFollowers: 50, maxFollowers: 100, target: 100 },
-  ];
-
+async function syncUsers(baseSeed: number): Promise<number> {
   let processed = 0;
 
-  for (const band of bandSpecs) {
+  for (const band of USER_BANDS) {
+    const bandSeed = makeBandSeed(
+      baseSeed,
+      band.minFollowers,
+      band.maxFollowers
+    );
     const candidates = await sampleUsersFromBand(
       band.minFollowers,
       band.maxFollowers,
-      band.target
+      band.target,
+      bandSeed
     );
 
     for (const user of candidates) {
@@ -144,9 +178,31 @@ type SearchUserResult = {
   html_url: string;
 };
 
-function shuffleInPlace<T>(items: T[]) {
+function mulberry32(seed: number) {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6d2b79f5;
+    let r = Math.imul(t ^ (t >>> 15), t | 1);
+    r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function makeBandSeed(
+  baseSeed: number,
+  minFollowers: number,
+  maxFollowers: number | null
+) {
+  const max = maxFollowers ?? 0;
+  return (
+    (baseSeed + minFollowers * 31 + max * 17) >>> 0
+  );
+}
+
+function shuffleInPlace<T>(items: T[], seed: number) {
+  const rng = mulberry32(seed);
   for (let i = items.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(rng() * (i + 1));
     [items[i], items[j]] = [items[j], items[i]];
   }
 }
@@ -155,6 +211,7 @@ async function sampleUsersFromBand(
   minFollowers: number,
   maxFollowers: number | null,
   target: number,
+  seed: number,
   perPage = 100,
   pagesPerOrder = 2
 ): Promise<SearchUserResult[]> {
@@ -169,7 +226,7 @@ async function sampleUsersFromBand(
   }
 
   const deduped = Array.from(new Map(results.map((r) => [r.id, r])).values());
-  shuffleInPlace(deduped);
+  shuffleInPlace(deduped, seed);
   return deduped.slice(0, target);
 }
 
@@ -211,62 +268,89 @@ async function upsertUser(
   // Collect contribution data for multiple years (2020-2025)
   // GitHub GraphQL only allows 1 year at a time
   const years = [2020, 2021, 2022, 2023, 2024, 2025];
+  const baselineYears = new Set<number>(BASELINE_YEARS);
+  const postYears = years.filter((y) => !baselineYears.has(y));
   let totalContributions = 0;
+  let baselineContributions = 0;
 
-  for (const year of years) {
-    try {
-      const startDate = new Date(year, 0, 1); // Jan 1
-      const endDate = new Date(year, 11, 31, 23, 59, 59); // Dec 31
+  const collectYear = async (year: number) => {
+    const startDate = new Date(year, 0, 1); // Jan 1
+    const endDate = new Date(year, 11, 31, 23, 59, 59); // Dec 31
 
-      // Don't fetch future dates
-      const now = new Date();
-      if (startDate > now) continue;
-      const effectiveEndDate = endDate > now ? now : endDate;
+    const now = new Date();
+    if (startDate > now) return;
+    const effectiveEndDate = endDate > now ? now : endDate;
 
-      const contributions = await getUserContributions(
-        searchResult.login,
-        startDate.toISOString(),
-        effectiveEndDate.toISOString()
-      );
+    const contributions = await getUserContributions(
+      searchResult.login,
+      startDate.toISOString(),
+      effectiveEndDate.toISOString()
+    );
 
-      // Store daily contribution data
-      for (const week of contributions.contributionCalendar.weeks) {
-        for (const day of week.contributionDays) {
-          if (day.contributionCount > 0) {
-            const dayDate = new Date(day.date);
+    for (const week of contributions.contributionCalendar.weeks) {
+      for (const day of week.contributionDays) {
+        if (day.contributionCount > 0) {
+          const dayDate = new Date(day.date);
 
-            // Upsert daily contribution
-            await prisma.userContributionMetrics.upsert({
-              where: {
-                date_userId: {
-                  date: dayDate,
-                  userId: user.id,
-                },
-              },
-              create: {
+          await prisma.userContributionMetrics.upsert({
+            where: {
+              date_userId: {
                 date: dayDate,
                 userId: user.id,
-                contributionCount: day.contributionCount,
               },
-              update: {
-                contributionCount: day.contributionCount,
-              },
-            });
+            },
+            create: {
+              date: dayDate,
+              userId: user.id,
+              contributionCount: day.contributionCount,
+            },
+            update: {
+              contributionCount: day.contributionCount,
+            },
+          });
 
-            totalContributions += day.contributionCount;
+          totalContributions += day.contributionCount;
+          if (baselineYears.has(year)) {
+            baselineContributions += day.contributionCount;
           }
         }
       }
+    }
+  };
+
+  let baselineFetchFailed = false;
+  for (const year of BASELINE_YEARS) {
+    try {
+      await collectYear(year);
     } catch (error) {
-      console.error(`Failed to get contributions for ${searchResult.login} in ${year}:`, error);
-      // Continue with other years
+      baselineFetchFailed = true;
+      console.error(
+        `Failed to get baseline contributions for ${searchResult.login} in ${year}:`,
+        error
+      );
+    }
+  }
+
+  if (baselineFetchFailed || baselineContributions < BASELINE_MIN_CONTRIBUTIONS) {
+    await prisma.sampledUser.delete({ where: { id: user.id } });
+    return false;
+  }
+
+  for (const year of postYears) {
+    try {
+      await collectYear(year);
+    } catch (error) {
+      console.error(
+        `Failed to get contributions for ${searchResult.login} in ${year}:`,
+        error
+      );
     }
   }
 
   // Update total contributions on user
   await prisma.sampledUser.update({
     where: { id: user.id },
-    data: { totalContributions },
+    data: { totalContributions, baselineContributions },
   });
 
   return true;
