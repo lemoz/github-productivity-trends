@@ -25,6 +25,17 @@ export async function GET(request: Request) {
       orderBy: { date: "asc" },
     });
 
+    // Get PR and issue metrics for flow/quality signals
+    const prMetrics = await prisma.pRMetrics.findMany({
+      where: { date: dateFilter },
+      orderBy: { date: "asc" },
+    });
+
+    const issueMetrics = await prisma.issueMetrics.findMany({
+      where: { date: dateFilter },
+      orderBy: { date: "asc" },
+    });
+
     // Get user and repo counts
     const [userCount, repoCount] = await Promise.all([
       prisma.sampledUser.count(),
@@ -33,7 +44,8 @@ export async function GET(request: Request) {
 
     // Check if we have any data
     const hasUserData = userContributions.length > 0;
-    const hasRepoData = commitMetrics.length > 0;
+    const hasRepoData =
+      commitMetrics.length > 0 || prMetrics.length > 0 || issueMetrics.length > 0;
 
     if (!hasUserData && !hasRepoData) {
       return NextResponse.json({
@@ -49,11 +61,32 @@ export async function GET(request: Request) {
     // Aggregate REPO metrics by month (secondary - for lines of code)
     const repoMonthlyData = aggregateRepoMetricsByMonth(commitMetrics);
 
+    const prMonthlyData = aggregatePRMetricsByMonth(prMetrics);
+    const issueMonthlyData = aggregateIssueMetricsByMonth(issueMetrics);
+
     // Calculate summary from USER contribution data
     const totalUserContributions = userContributions.reduce((sum, m) => sum + m.contributionCount, 0);
     const totalRepoCommits = commitMetrics.reduce((sum, m) => sum + m.commitCount, 0);
     const totalLinesAdded = commitMetrics.reduce((sum, m) => sum + m.linesAdded, 0);
     const totalLinesRemoved = commitMetrics.reduce((sum, m) => sum + m.linesRemoved, 0);
+
+    const totalPRsOpened = prMetrics.reduce((sum, m) => sum + m.prsOpened, 0);
+    const totalPRsMerged = prMetrics.reduce((sum, m) => sum + m.prsMerged, 0);
+    const weightedMergeHours = prMetrics.reduce(
+      (sum, m) => sum + (m.avgTimeToMergeHrs || 0) * m.prsMerged,
+      0
+    );
+    const avgTimeToMergeHours =
+      totalPRsMerged > 0 ? weightedMergeHours / totalPRsMerged : null;
+
+    const totalIssuesOpened = issueMetrics.reduce((sum, m) => sum + m.issuesOpened, 0);
+    const totalIssuesClosed = issueMetrics.reduce((sum, m) => sum + m.issuesClosed, 0);
+    const weightedResolutionHours = issueMetrics.reduce(
+      (sum, m) => sum + (m.avgResolutionHrs || 0) * m.issuesClosed,
+      0
+    );
+    const avgResolutionHours =
+      totalIssuesClosed > 0 ? weightedResolutionHours / totalIssuesClosed : null;
 
     // Average contributions per user per calendar-day (includes inactive days)
     const avgContributionsPerUserPerDay = userMonthlyData.length > 0
@@ -66,16 +99,26 @@ export async function GET(request: Request) {
       totalLinesAdded,
       totalLinesRemoved,
       avgLinesPerCommit: totalRepoCommits > 0 ? (totalLinesAdded + totalLinesRemoved) / totalRepoCommits : 0,
-      totalPRsOpened: 0,
-      totalPRsMerged: 0,
-      avgTimeToMergeHours: null,
-      totalIssuesOpened: 0,
-      totalIssuesClosed: 0,
-      avgResolutionHours: null,
+      totalPRsOpened,
+      totalPRsMerged,
+      avgTimeToMergeHours,
+      totalIssuesOpened,
+      totalIssuesClosed,
+      avgResolutionHours,
       activeUsers: userCount,
       activeRepos: repoCount,
-      periodStart: userMonthlyData[0]?.date || repoMonthlyData[0]?.date || "",
-      periodEnd: userMonthlyData[userMonthlyData.length - 1]?.date || repoMonthlyData[repoMonthlyData.length - 1]?.date || "",
+      periodStart:
+        userMonthlyData[0]?.date ||
+        repoMonthlyData[0]?.date ||
+        prMonthlyData[0]?.date ||
+        issueMonthlyData[0]?.date ||
+        "",
+      periodEnd:
+        userMonthlyData[userMonthlyData.length - 1]?.date ||
+        repoMonthlyData[repoMonthlyData.length - 1]?.date ||
+        prMonthlyData[prMonthlyData.length - 1]?.date ||
+        issueMonthlyData[issueMonthlyData.length - 1]?.date ||
+        "",
     };
 
     // Build trend data - USER contributions for commits, REPO data for lines
@@ -90,8 +133,14 @@ export async function GET(request: Request) {
         date: m.date,
         value: m.avgLinesPerCommit,
       })),
-      prMergeTime: [], // TODO: Add when PR data is synced
-      issueResolution: [], // TODO: Add when issue data is synced
+      prMergeTime: prMonthlyData.map((m) => ({
+        date: m.date,
+        value: m.avgTimeToMergeHrs,
+      })),
+      issueResolution: issueMonthlyData.map((m) => ({
+        date: m.date,
+        value: m.avgResolutionHrs,
+      })),
     };
 
     return NextResponse.json({
@@ -101,6 +150,8 @@ export async function GET(request: Request) {
       dataCounts: {
         userContributions: userContributions.length,
         repoCommits: commitMetrics.length,
+        repoPRDays: prMetrics.length,
+        repoIssueDays: issueMetrics.length,
       },
     });
   } catch (error) {
@@ -177,6 +228,65 @@ function aggregateRepoMetricsByMonth(
     result.push({
       date: `${month}-01`,
       avgLinesPerCommit: data.commits > 0 ? data.lines / data.commits : 0,
+    });
+  }
+
+  return result.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function aggregatePRMetricsByMonth(
+  metrics: Array<{
+    date: Date;
+    prsMerged: number;
+    avgTimeToMergeHrs: number | null;
+  }>
+): Array<{ date: string; avgTimeToMergeHrs: number }> {
+  const monthMap = new Map<string, { merged: number; mergeHours: number }>();
+
+  for (const m of metrics) {
+    const monthKey = m.date.toISOString().slice(0, 7);
+    const existing = monthMap.get(monthKey) || { merged: 0, mergeHours: 0 };
+    monthMap.set(monthKey, {
+      merged: existing.merged + m.prsMerged,
+      mergeHours: existing.mergeHours + (m.avgTimeToMergeHrs || 0) * m.prsMerged,
+    });
+  }
+
+  const result: Array<{ date: string; avgTimeToMergeHrs: number }> = [];
+  for (const [month, data] of monthMap.entries()) {
+    result.push({
+      date: `${month}-01`,
+      avgTimeToMergeHrs: data.merged > 0 ? data.mergeHours / data.merged : 0,
+    });
+  }
+
+  return result.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function aggregateIssueMetricsByMonth(
+  metrics: Array<{
+    date: Date;
+    issuesClosed: number;
+    avgResolutionHrs: number | null;
+  }>
+): Array<{ date: string; avgResolutionHrs: number }> {
+  const monthMap = new Map<string, { closed: number; resolutionHours: number }>();
+
+  for (const m of metrics) {
+    const monthKey = m.date.toISOString().slice(0, 7);
+    const existing = monthMap.get(monthKey) || { closed: 0, resolutionHours: 0 };
+    monthMap.set(monthKey, {
+      closed: existing.closed + m.issuesClosed,
+      resolutionHours:
+        existing.resolutionHours + (m.avgResolutionHrs || 0) * m.issuesClosed,
+    });
+  }
+
+  const result: Array<{ date: string; avgResolutionHrs: number }> = [];
+  for (const [month, data] of monthMap.entries()) {
+    result.push({
+      date: `${month}-01`,
+      avgResolutionHrs: data.closed > 0 ? data.resolutionHours / data.closed : 0,
     });
   }
 

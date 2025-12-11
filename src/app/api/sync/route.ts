@@ -6,6 +6,8 @@ import {
   getUser,
   getUserContributions,
   getContributorStats,
+  getRepoPRs,
+  getRepoIssues,
   getRateLimitStatus,
 } from "@/lib/github";
 import { TRACKED_LANGUAGES } from "@/types/metrics";
@@ -306,6 +308,25 @@ async function syncRepos(): Promise<number> {
       } catch {
         // Stats may not be available immediately
       }
+
+      // Collect recent PR and issue data for flow metrics
+      try {
+        const prs = await fetchPagedPRs(repo.owner.login, repo.name);
+        if (prs.length > 0) {
+          await processRepoPRs(repo.id, prs);
+        }
+      } catch (error) {
+        console.error(`Failed to sync PRs for ${repo.full_name}:`, error);
+      }
+
+      try {
+        const issues = await fetchPagedIssues(repo.owner.login, repo.name);
+        if (issues.length > 0) {
+          await processRepoIssues(repo.id, issues);
+        }
+      } catch (error) {
+        console.error(`Failed to sync issues for ${repo.full_name}:`, error);
+      }
     }
   }
 
@@ -404,5 +425,262 @@ async function processRepoStats(
         });
       }
     }
+  }
+}
+
+interface RepoPullRequest {
+  created_at: string;
+  closed_at: string | null;
+  merged_at: string | null;
+}
+
+interface RepoIssue {
+  created_at: string;
+  closed_at: string | null;
+}
+
+async function fetchPagedPRs(
+  owner: string,
+  repo: string,
+  maxPages = 3,
+  perPage = 100
+): Promise<RepoPullRequest[]> {
+  const all: RepoPullRequest[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const pageResults = (await getRepoPRs(
+      owner,
+      repo,
+      "all",
+      perPage,
+      page
+    )) as unknown as RepoPullRequest[];
+
+    for (const pr of pageResults) {
+      if (pr?.created_at) {
+        all.push({
+          created_at: pr.created_at,
+          closed_at: pr.closed_at ?? null,
+          merged_at: pr.merged_at ?? null,
+        });
+      }
+    }
+
+    if (pageResults.length < perPage) break;
+  }
+  return all;
+}
+
+async function fetchPagedIssues(
+  owner: string,
+  repo: string,
+  maxPages = 3,
+  perPage = 100
+): Promise<RepoIssue[]> {
+  const all: RepoIssue[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const pageResults = (await getRepoIssues(
+      owner,
+      repo,
+      "all",
+      perPage,
+      page
+    )) as unknown as RepoIssue[];
+
+    for (const issue of pageResults) {
+      if (issue?.created_at) {
+        all.push({
+          created_at: issue.created_at,
+          closed_at: issue.closed_at ?? null,
+        });
+      }
+    }
+
+    if (pageResults.length < perPage) break;
+  }
+  return all;
+}
+
+function normalizeToDay(dateStr: string): Date {
+  const d = new Date(dateStr);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
+type PRDayAggregate = {
+  opened: number;
+  closed: number;
+  merged: number;
+  mergeHoursTotal: number;
+  mergeCount: number;
+};
+
+type IssueDayAggregate = {
+  opened: number;
+  closed: number;
+  resolutionHoursTotal: number;
+  resolutionCount: number;
+};
+
+async function processRepoPRs(repoGithubId: number, prs: RepoPullRequest[]) {
+  const repo = await prisma.sampledRepo.findUnique({
+    where: { githubId: repoGithubId },
+  });
+  if (!repo) return;
+
+  const dayMap = new Map<string, PRDayAggregate>();
+
+  const addToDay = (
+    dateStr: string | null | undefined,
+    fn: (entry: PRDayAggregate) => void
+  ) => {
+    if (!dateStr) return;
+    const day = normalizeToDay(dateStr);
+    const key = day.toISOString().slice(0, 10);
+    const entry =
+      dayMap.get(key) || {
+        opened: 0,
+        closed: 0,
+        merged: 0,
+        mergeHoursTotal: 0,
+        mergeCount: 0,
+      };
+    fn(entry);
+    dayMap.set(key, entry);
+  };
+
+  for (const pr of prs) {
+    addToDay(pr.created_at, (e) => { e.opened += 1; });
+    addToDay(pr.closed_at, (e) => { e.closed += 1; });
+
+    if (pr.merged_at) {
+      addToDay(pr.merged_at, (e) => {
+        e.merged += 1;
+        if (pr.created_at) {
+          const hours =
+            (new Date(pr.merged_at).getTime() - new Date(pr.created_at).getTime()) /
+            (1000 * 60 * 60);
+          if (Number.isFinite(hours)) {
+            e.mergeHoursTotal += hours;
+            e.mergeCount += 1;
+          }
+        }
+      });
+    }
+  }
+
+  for (const [key, data] of dayMap.entries()) {
+    const date = new Date(`${key}T00:00:00.000Z`);
+    const avgTimeToMergeHrs =
+      data.mergeCount > 0 ? data.mergeHoursTotal / data.mergeCount : null;
+
+    const existing = await prisma.pRMetrics.findFirst({
+      where: {
+        date,
+        repoId: repo.id,
+        language: repo.primaryLanguage,
+        userId: null,
+      },
+    });
+
+    if (existing) {
+      await prisma.pRMetrics.update({
+        where: { id: existing.id },
+        data: {
+          prsOpened: data.opened,
+          prsClosed: data.closed,
+          prsMerged: data.merged,
+          avgTimeToMergeHrs,
+        },
+      });
+    } else {
+      await prisma.pRMetrics.create({
+        data: {
+          date,
+          repoId: repo.id,
+          language: repo.primaryLanguage,
+          prsOpened: data.opened,
+          prsClosed: data.closed,
+          prsMerged: data.merged,
+          avgTimeToMergeHrs,
+        },
+      });
+    }
+  }
+}
+
+async function processRepoIssues(repoGithubId: number, issues: RepoIssue[]) {
+  const repo = await prisma.sampledRepo.findUnique({
+    where: { githubId: repoGithubId },
+  });
+  if (!repo) return;
+
+  const dayMap = new Map<string, IssueDayAggregate>();
+
+  const addToDay = (
+    dateStr: string | null | undefined,
+    fn: (entry: IssueDayAggregate) => void
+  ) => {
+    if (!dateStr) return;
+    const day = normalizeToDay(dateStr);
+    const key = day.toISOString().slice(0, 10);
+    const entry =
+      dayMap.get(key) || {
+        opened: 0,
+        closed: 0,
+        resolutionHoursTotal: 0,
+        resolutionCount: 0,
+      };
+    fn(entry);
+    dayMap.set(key, entry);
+  };
+
+  for (const issue of issues) {
+    addToDay(issue.created_at, (e) => { e.opened += 1; });
+
+    if (issue.closed_at) {
+      addToDay(issue.closed_at, (e) => {
+        e.closed += 1;
+        if (issue.created_at) {
+          const hours =
+            (new Date(issue.closed_at).getTime() - new Date(issue.created_at).getTime()) /
+            (1000 * 60 * 60);
+          if (Number.isFinite(hours)) {
+            e.resolutionHoursTotal += hours;
+            e.resolutionCount += 1;
+          }
+        }
+      });
+    }
+  }
+
+  for (const [key, data] of dayMap.entries()) {
+    const date = new Date(`${key}T00:00:00.000Z`);
+    const avgResolutionHrs =
+      data.resolutionCount > 0
+        ? data.resolutionHoursTotal / data.resolutionCount
+        : null;
+
+    await prisma.issueMetrics.upsert({
+      where: {
+        date_repoId_language: {
+          date,
+          repoId: repo.id,
+          language: repo.primaryLanguage,
+        },
+      },
+      create: {
+        date,
+        repoId: repo.id,
+        language: repo.primaryLanguage,
+        issuesOpened: data.opened,
+        issuesClosed: data.closed,
+        avgResolutionHrs,
+      },
+      update: {
+        issuesOpened: data.opened,
+        issuesClosed: data.closed,
+        avgResolutionHrs,
+      },
+    });
   }
 }
