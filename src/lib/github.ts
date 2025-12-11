@@ -23,6 +23,17 @@ const CACHE_TTL = {
   CONTRIBUTION_DATA: 1 * 60 * 60, // 1 hour
 };
 
+const graphqlThrottleRaw = Number(process.env.GRAPHQL_THROTTLE_MS ?? 800);
+const GRAPHQL_THROTTLE_MS = Number.isFinite(graphqlThrottleRaw)
+  ? graphqlThrottleRaw
+  : 800;
+
+async function throttleGraphql() {
+  if (GRAPHQL_THROTTLE_MS > 0) {
+    await new Promise((resolve) => setTimeout(resolve, GRAPHQL_THROTTLE_MS));
+  }
+}
+
 // Helper to get cached data or fetch fresh
 async function getCachedOrFetch<T>(
   cacheKey: string,
@@ -288,6 +299,7 @@ export async function getUserContributions(
         to,
       });
 
+      await throttleGraphql();
       return response.user.contributionsCollection;
     },
     CACHE_TTL.CONTRIBUTION_DATA
