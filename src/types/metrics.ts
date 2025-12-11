@@ -11,7 +11,7 @@ export interface TimeSeriesDataPoint {
 export interface GlobalMetrics {
   // Commit metrics
   totalCommits: number;
-  avgCommitsPerUser: number;
+  avgContributionsPerUserPerDay: number;
   totalLinesAdded: number;
   totalLinesRemoved: number;
   avgLinesPerCommit: number;

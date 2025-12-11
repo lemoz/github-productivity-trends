@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import type { GlobalMetrics, TrendData, TimeSeriesDataPoint } from "@/types/metrics";
+import type { GlobalMetrics, TrendData } from "@/types/metrics";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -55,14 +55,14 @@ export async function GET(request: Request) {
     const totalLinesAdded = commitMetrics.reduce((sum, m) => sum + m.linesAdded, 0);
     const totalLinesRemoved = commitMetrics.reduce((sum, m) => sum + m.linesRemoved, 0);
 
-    // Calculate average commits per day per user from the monthly data
-    const avgCommitsPerDayPerUser = userMonthlyData.length > 0
-      ? userMonthlyData.reduce((sum, m) => sum + m.avgCommitsPerDayPerUser, 0) / userMonthlyData.length
+    // Average contributions per user per calendar-day (includes inactive days)
+    const avgContributionsPerUserPerDay = userMonthlyData.length > 0
+      ? userMonthlyData.reduce((sum, m) => sum + m.avgContributionsPerUserPerDay, 0) / userMonthlyData.length
       : 0;
 
     const summary: GlobalMetrics = {
       totalCommits: totalUserContributions, // User contributions is primary
-      avgCommitsPerUser: avgCommitsPerDayPerUser, // Now this is avg per DAY
+      avgContributionsPerUserPerDay,
       totalLinesAdded,
       totalLinesRemoved,
       avgLinesPerCommit: totalRepoCommits > 0 ? (totalLinesAdded + totalLinesRemoved) / totalRepoCommits : 0,
@@ -80,10 +80,10 @@ export async function GET(request: Request) {
 
     // Build trend data - USER contributions for commits, REPO data for lines
     const trends: TrendData = {
-      // User productivity - avg commits per day per user
+      // User productivity - avg contributions per user per day
       commits: userMonthlyData.map((m) => ({
         date: m.date,
-        value: m.avgCommitsPerDayPerUser,
+        value: m.avgContributionsPerUserPerDay,
       })),
       // Lines of code from repo stats
       linesOfCode: repoMonthlyData.map((m) => ({
@@ -112,23 +112,7 @@ export async function GET(request: Request) {
   }
 }
 
-interface UserMonthlyAggregate {
-  date: string;
-  totalContributions: number;
-  uniqueUsers: Set<string>;
-  dayCount: number;
-  avgContributionsPerUserPerWeek: number;
-}
-
-interface RepoMonthlyAggregate {
-  date: string;
-  totalCommits: number;
-  totalLines: number;
-  weekCount: number;
-  avgLinesPerCommit: number;
-}
-
-// Aggregate USER contribution data by month - calculate avg commits per day per person
+// Aggregate USER contribution data by month - calculate avg contributions per user per day
 function aggregateUserContributionsByMonth(
   contributions: Array<{
     date: Date;
@@ -136,38 +120,32 @@ function aggregateUserContributionsByMonth(
     contributionCount: number;
   }>,
   totalUserCount: number
-): Array<{ date: string; avgCommitsPerDayPerUser: number }> {
-  // Group by month, tracking unique users and total contributions
-  const monthMap = new Map<string, {
-    contributions: number;
-    userDays: Map<string, number>; // userId -> number of days they contributed
-  }>();
+): Array<{ date: string; avgContributionsPerUserPerDay: number }> {
+  // Group by month, tracking total contributions
+  const monthMap = new Map<string, number>();
 
   for (const c of contributions) {
     const monthKey = c.date.toISOString().slice(0, 7); // YYYY-MM
-    const existing = monthMap.get(monthKey) || {
-      contributions: 0,
-      userDays: new Map<string, number>()
-    };
-
-    existing.contributions += c.contributionCount;
-    existing.userDays.set(c.userId, (existing.userDays.get(c.userId) || 0) + 1);
-
-    monthMap.set(monthKey, existing);
+    monthMap.set(monthKey, (monthMap.get(monthKey) || 0) + c.contributionCount);
   }
 
-  const result: Array<{ date: string; avgCommitsPerDayPerUser: number }> = [];
-  for (const [month, data] of monthMap.entries()) {
-    // Calculate: total contributions / total user-days
-    // This gives us "average commits per day per active user"
-    const totalUserDays = Array.from(data.userDays.values()).reduce((sum, days) => sum + days, 0);
-    const avgCommitsPerDayPerUser = totalUserDays > 0
-      ? data.contributions / totalUserDays
-      : 0;
+  const result: Array<{ date: string; avgContributionsPerUserPerDay: number }> = [];
+  for (const [month, totalContributions] of monthMap.entries()) {
+    const [yearStr, monthStr] = month.split("-");
+    const year = Number(yearStr);
+    const monthNum = Number(monthStr); // 1-based
+    const daysInMonth = Number.isFinite(year) && Number.isFinite(monthNum)
+      ? new Date(year, monthNum, 0).getDate()
+      : 30;
+
+    const avgContributionsPerUserPerDay =
+      totalUserCount > 0 && daysInMonth > 0
+        ? totalContributions / (totalUserCount * daysInMonth)
+        : 0;
 
     result.push({
       date: `${month}-01`,
-      avgCommitsPerDayPerUser,
+      avgContributionsPerUserPerDay,
     });
   }
 
@@ -208,7 +186,7 @@ function aggregateRepoMetricsByMonth(
 function getEmptySummary(): GlobalMetrics {
   return {
     totalCommits: 0,
-    avgCommitsPerUser: 0,
+    avgContributionsPerUserPerDay: 0,
     totalLinesAdded: 0,
     totalLinesRemoved: 0,
     avgLinesPerCommit: 0,
