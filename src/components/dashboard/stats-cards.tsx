@@ -11,11 +11,11 @@ interface StatsCardsProps {
 export function StatsCards({ metrics, isLoading }: StatsCardsProps) {
   const stats = [
     {
-      title: "Avg Commits/Day",
-      value: metrics?.avgCommitsPerUser
-        ? metrics.avgCommitsPerUser.toFixed(1)
+      title: "Avg Contribs/Day",
+      value: metrics?.avgContributionsPerUserPerDay
+        ? metrics.avgContributionsPerUserPerDay.toFixed(2)
         : "—",
-      description: "Average commits per day per user",
+      description: "Average GitHub contributions per user per day",
       trend: "",
       trendUp: true,
     },

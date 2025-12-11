@@ -76,7 +76,7 @@ export default function Dashboard() {
                 Productivity Trends Over Time
               </h2>
               <TabsList>
-                <TabsTrigger value="commits">Commits</TabsTrigger>
+                <TabsTrigger value="commits">Contributions</TabsTrigger>
                 <TabsTrigger value="lines">Lines of Code</TabsTrigger>
                 <TabsTrigger value="prs">PR Velocity</TabsTrigger>
                 <TabsTrigger value="issues">Issue Resolution</TabsTrigger>
@@ -91,8 +91,8 @@ export default function Dashboard() {
                   ) : (
                     <TrendLineChart
                       data={trends?.commits || []}
-                      title="Average Commits Per Day Per User"
-                      yAxisLabel="Commits/Day"
+                      title="Average Contributions Per User Per Day"
+                      yAxisLabel="Contributions/Day"
                       color="#3b82f6"
                       valueFormatter={(v) => v.toFixed(1)}
                     />
