@@ -99,74 +99,89 @@ export async function GET() {
 
 // Sample users across tiers - 1000 users total
 async function syncUsers(): Promise<number> {
-  let count = 0;
+  const bandSpecs: Array<{
+    tier: "top" | "mid" | "casual";
+    minFollowers: number;
+    maxFollowers: number | null;
+    target: number;
+  }> = [
+    { tier: "top", minFollowers: 10000, maxFollowers: null, target: 100 },
+    { tier: "top", minFollowers: 5000, maxFollowers: 10000, target: 100 },
+    { tier: "mid", minFollowers: 2000, maxFollowers: 5000, target: 100 },
+    { tier: "mid", minFollowers: 1000, maxFollowers: 2000, target: 100 },
+    { tier: "mid", minFollowers: 500, maxFollowers: 1000, target: 100 },
+    { tier: "casual", minFollowers: 300, maxFollowers: 500, target: 100 },
+    { tier: "casual", minFollowers: 200, maxFollowers: 300, target: 100 },
+    { tier: "casual", minFollowers: 150, maxFollowers: 200, target: 100 },
+    { tier: "casual", minFollowers: 100, maxFollowers: 150, target: 100 },
+    { tier: "casual", minFollowers: 50, maxFollowers: 100, target: 100 },
+  ];
 
-  // Top tier: 10000+ followers (200 users)
-  const topUsers = await searchUsers(10000, null, 100);
-  for (const user of topUsers) {
-    await upsertUser(user, "top");
-    count++;
-  }
-  // Get more top users with different sort
-  const topUsers2 = await searchUsers(5000, 10000, 100);
-  for (const user of topUsers2) {
-    await upsertUser(user, "top");
-    count++;
-  }
+  let processed = 0;
 
-  // Mid tier: 1000-5000 followers (300 users)
-  const midUsers = await searchUsers(2000, 5000, 100);
-  for (const user of midUsers) {
-    await upsertUser(user, "mid");
-    count++;
-  }
-  const midUsers2 = await searchUsers(1000, 2000, 100);
-  for (const user of midUsers2) {
-    await upsertUser(user, "mid");
-    count++;
-  }
-  const midUsers3 = await searchUsers(500, 1000, 100);
-  for (const user of midUsers3) {
-    await upsertUser(user, "mid");
-    count++;
-  }
+  for (const band of bandSpecs) {
+    const candidates = await sampleUsersFromBand(
+      band.minFollowers,
+      band.maxFollowers,
+      band.target
+    );
 
-  // Casual tier: 100-500 followers (500 users)
-  const casualUsers = await searchUsers(300, 500, 100);
-  for (const user of casualUsers) {
-    await upsertUser(user, "casual");
-    count++;
-  }
-  const casualUsers2 = await searchUsers(200, 300, 100);
-  for (const user of casualUsers2) {
-    await upsertUser(user, "casual");
-    count++;
-  }
-  const casualUsers3 = await searchUsers(150, 200, 100);
-  for (const user of casualUsers3) {
-    await upsertUser(user, "casual");
-    count++;
-  }
-  const casualUsers4 = await searchUsers(100, 150, 100);
-  for (const user of casualUsers4) {
-    await upsertUser(user, "casual");
-    count++;
-  }
-  const casualUsers5 = await searchUsers(50, 100, 100);
-  for (const user of casualUsers5) {
-    await upsertUser(user, "casual");
-    count++;
+    for (const user of candidates) {
+      const ok = await upsertUser(user, band.tier);
+      if (ok) processed++;
+    }
   }
 
-  return count;
+  return processed;
+}
+
+type SearchUserResult = {
+  id: number;
+  login: string;
+  avatar_url: string;
+  html_url: string;
+};
+
+function shuffleInPlace<T>(items: T[]) {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+}
+
+async function sampleUsersFromBand(
+  minFollowers: number,
+  maxFollowers: number | null,
+  target: number,
+  perPage = 100,
+  pagesPerOrder = 2
+): Promise<SearchUserResult[]> {
+  const results: SearchUserResult[] = [];
+  const orders: Array<"asc" | "desc"> = ["desc", "asc"];
+
+  for (const order of orders) {
+    for (let page = 1; page <= pagesPerOrder; page++) {
+      const pageResults = await searchUsers(minFollowers, maxFollowers, perPage, page, order);
+      results.push(...pageResults);
+    }
+  }
+
+  const deduped = Array.from(new Map(results.map((r) => [r.id, r])).values());
+  shuffleInPlace(deduped);
+  return deduped.slice(0, target);
 }
 
 async function upsertUser(
   searchResult: { id: number; login: string; avatar_url: string; html_url: string },
   tier: string
-) {
+): Promise<boolean> {
   // Get full user details
   const userDetails = await getUser(searchResult.login);
+
+  // Skip orgs and obvious bots
+  if (userDetails.type !== "User" || searchResult.login.endsWith("[bot]")) {
+    return false;
+  }
 
   // Upsert the user first to get the userId
   const user = await prisma.sampledUser.upsert({
@@ -251,6 +266,8 @@ async function upsertUser(
     where: { id: user.id },
     data: { totalContributions },
   });
+
+  return true;
 }
 
 // Sample repos across languages

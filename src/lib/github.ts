@@ -63,7 +63,9 @@ async function getCachedOrFetch<T>(
 export async function searchUsers(
   minFollowers: number,
   maxFollowers: number | null,
-  perPage = 30
+  perPage = 30,
+  page = 1,
+  order: "asc" | "desc" = "desc"
 ) {
   await rateLimiter.waitIfNeeded("search");
 
@@ -71,7 +73,7 @@ export async function searchUsers(
     ? `followers:${minFollowers}..${maxFollowers} type:user`
     : `followers:>=${minFollowers} type:user`;
 
-  const cacheKey = `search:users:${minFollowers}-${maxFollowers}`;
+  const cacheKey = `search:users:${minFollowers}-${maxFollowers ?? "plus"}:${perPage}:${page}:${order}`;
 
   return getCachedOrFetch(
     cacheKey,
@@ -79,8 +81,9 @@ export async function searchUsers(
       const response = await octokit.search.users({
         q: query,
         sort: "followers",
-        order: "desc",
+        order,
         per_page: perPage,
+        page,
       });
 
       // Update rate limit info
@@ -96,10 +99,16 @@ export async function searchUsers(
 }
 
 // Search for popular repositories by language
-export async function searchRepos(language: string, minStars = 1000, perPage = 30) {
+export async function searchRepos(
+  language: string,
+  minStars = 1000,
+  perPage = 30,
+  page = 1,
+  order: "asc" | "desc" = "desc"
+) {
   await rateLimiter.waitIfNeeded("search");
 
-  const cacheKey = `search:repos:${language}:${minStars}`;
+  const cacheKey = `search:repos:${language}:${minStars}:${perPage}:${page}:${order}`;
 
   return getCachedOrFetch(
     cacheKey,
@@ -107,8 +116,9 @@ export async function searchRepos(language: string, minStars = 1000, perPage = 3
       const response = await octokit.search.repos({
         q: `language:${language} stars:>=${minStars}`,
         sort: "stars",
-        order: "desc",
+        order,
         per_page: perPage,
+        page,
       });
 
       rateLimiter.updateFromHeaders(
