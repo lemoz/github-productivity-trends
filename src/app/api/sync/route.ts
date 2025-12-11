@@ -38,6 +38,23 @@ const BASELINE_MIN_CONTRIBUTIONS = Number.isFinite(baselineMinRaw)
 const seedRaw = Number(process.env.SAMPLING_SEED ?? 42);
 const DEFAULT_SAMPLING_SEED = Number.isFinite(seedRaw) ? seedRaw : 42;
 
+const usersPerBandEnvRaw = process.env.USERS_PER_BAND
+  ? Number(process.env.USERS_PER_BAND)
+  : NaN;
+const USERS_PER_BAND_ENV = Number.isFinite(usersPerBandEnvRaw)
+  ? usersPerBandEnvRaw
+  : null;
+
+function resolveUserBands(usersPerBandOverride: number | null) {
+  if (usersPerBandOverride != null) {
+    return USER_BANDS.map((b) => ({ ...b, target: usersPerBandOverride }));
+  }
+  if (USERS_PER_BAND_ENV != null) {
+    return USER_BANDS.map((b) => ({ ...b, target: USERS_PER_BAND_ENV }));
+  }
+  return USER_BANDS;
+}
+
 // POST /api/sync - Trigger data collection
 export async function POST(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -47,14 +64,24 @@ export async function POST(request: Request) {
   const samplingSeed = Number.isFinite(samplingSeedRaw)
     ? samplingSeedRaw
     : DEFAULT_SAMPLING_SEED;
+  const usersPerBandParam = searchParams.get("usersPerBand");
+  const usersPerBandRaw = usersPerBandParam ? Number(usersPerBandParam) : NaN;
+  const usersPerBandOverride = Number.isFinite(usersPerBandRaw)
+    ? usersPerBandRaw
+    : null;
 
   try {
+    const effectiveBands =
+      type === "users" || type === "all"
+        ? resolveUserBands(usersPerBandOverride)
+        : USER_BANDS;
     const samplingParams =
       type === "users" || type === "all"
         ? JSON.stringify({
             baselineYears: BASELINE_YEARS,
             baselineMinContributions: BASELINE_MIN_CONTRIBUTIONS,
-            bands: USER_BANDS,
+            bands: effectiveBands,
+            usersPerBand: usersPerBandOverride ?? USERS_PER_BAND_ENV,
             perPage: 100,
             pagesPerOrder: 2,
             orders: ["desc", "asc"],
@@ -77,7 +104,7 @@ export async function POST(request: Request) {
 
     // Sync users
     if (type === "users" || type === "all") {
-      itemsProcessed += await syncUsers(samplingSeed);
+      itemsProcessed += await syncUsers(samplingSeed, effectiveBands);
     }
 
     // Sync repos
@@ -146,10 +173,13 @@ export async function GET() {
 }
 
 // Sample users across tiers - 1000 users total
-async function syncUsers(baseSeed: number): Promise<number> {
+async function syncUsers(
+  baseSeed: number,
+  bands: typeof USER_BANDS
+): Promise<number> {
   let processed = 0;
 
-  for (const band of USER_BANDS) {
+  for (const band of bands) {
     const bandSeed = makeBandSeed(
       baseSeed,
       band.minFollowers,
