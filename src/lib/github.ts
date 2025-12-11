@@ -299,11 +299,12 @@ export async function getRepoPRs(
   owner: string,
   repo: string,
   state: "open" | "closed" | "all" = "all",
-  perPage = 100
+  perPage = 100,
+  page = 1
 ) {
   await rateLimiter.waitIfNeeded("rest");
 
-  const cacheKey = `prs:${owner}/${repo}:${state}`;
+  const cacheKey = `prs:${owner}/${repo}:${state}:${perPage}:${page}`;
 
   return getCachedOrFetch(
     cacheKey,
@@ -313,6 +314,7 @@ export async function getRepoPRs(
         repo,
         state,
         per_page: perPage,
+        page,
         sort: "updated",
         direction: "desc",
       });
@@ -333,11 +335,12 @@ export async function getRepoIssues(
   owner: string,
   repo: string,
   state: "open" | "closed" | "all" = "all",
-  perPage = 100
+  perPage = 100,
+  page = 1
 ) {
   await rateLimiter.waitIfNeeded("rest");
 
-  const cacheKey = `issues:${owner}/${repo}:${state}`;
+  const cacheKey = `issues:${owner}/${repo}:${state}:${perPage}:${page}`;
 
   return getCachedOrFetch(
     cacheKey,
@@ -347,6 +350,7 @@ export async function getRepoIssues(
         repo,
         state,
         per_page: perPage,
+        page,
         sort: "updated",
         direction: "desc",
       });
