@@ -165,19 +165,27 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent className="prose prose-sm max-w-none text-gray-600">
               <p>
-                This dashboard tracks GitHub productivity metrics over time to help
-                visualize the impact of AI coding tools on developer productivity.
-                We sample users across different activity tiers and popular
-                repositories across multiple programming languages.
+                This dashboard tracks public GitHub activity over time to explore
+                whether AI coding tools are associated with changes in developer
+                throughput and shipping speed. We sample active developers across
+                follower tiers and popular repositories across major languages.
               </p>
               <p className="mt-2">
-                <strong>Metrics tracked:</strong> Commits per user, lines of code
-                per commit, PR merge velocity, and issue resolution time.
+                <strong>Primary metric:</strong> average GitHub contributions per
+                user per day (from contribution calendars, including commits, PRs,
+                issues, and reviews).
               </p>
               <p className="mt-2">
-                <strong>AI milestones:</strong> Vertical lines on charts indicate
-                major AI tool releases (Copilot, ChatGPT, Claude, etc.) to help
-                identify potential correlations.
+                <strong>Flow metrics:</strong> lines changed per commit, PR merge
+                time, and issue resolution time.
+              </p>
+              <p className="mt-2">
+                <strong>AI milestones:</strong> Chart markers show major AI tool
+                releases (Copilot, ChatGPT, Claude, etc.) as reference points —
+                not direct adoption signals.
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                Results are correlational and based on public data only.
               </p>
             </CardContent>
           </Card>
