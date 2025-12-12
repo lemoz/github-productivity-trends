@@ -3,15 +3,26 @@ import { graphql } from "@octokit/graphql";
 import { rateLimiter } from "./rate-limiter";
 import { prisma } from "./prisma";
 
+const requestTimeoutRaw = Number(process.env.GITHUB_REQUEST_TIMEOUT_MS ?? 30_000);
+const GITHUB_REQUEST_TIMEOUT_MS = Number.isFinite(requestTimeoutRaw)
+  ? Math.max(0, requestTimeoutRaw)
+  : 30_000;
+
 // Initialize Octokit with auth token
 const octokit = new Octokit({
   auth: process.env.GITHUB_TOKEN,
+  request: {
+    timeout: GITHUB_REQUEST_TIMEOUT_MS,
+  },
 });
 
 // Initialize GraphQL client
 const graphqlWithAuth = graphql.defaults({
   headers: {
     authorization: `token ${process.env.GITHUB_TOKEN}`,
+  },
+  request: {
+    timeout: GITHUB_REQUEST_TIMEOUT_MS,
   },
 });
 
@@ -32,6 +43,96 @@ async function throttleGraphql() {
   if (GRAPHQL_THROTTLE_MS > 0) {
     await new Promise((resolve) => setTimeout(resolve, GRAPHQL_THROTTLE_MS));
   }
+}
+
+const retryAttemptsRaw = Number(process.env.GITHUB_RETRY_ATTEMPTS ?? 3);
+const GITHUB_RETRY_ATTEMPTS = Number.isFinite(retryAttemptsRaw)
+  ? Math.max(1, retryAttemptsRaw)
+  : 3;
+
+const retryBaseDelayRaw = Number(process.env.GITHUB_RETRY_BASE_DELAY_MS ?? 800);
+const GITHUB_RETRY_BASE_DELAY_MS = Number.isFinite(retryBaseDelayRaw)
+  ? Math.max(0, retryBaseDelayRaw)
+  : 800;
+
+const retryMaxDelayRaw = Number(process.env.GITHUB_RETRY_MAX_DELAY_MS ?? 8000);
+const GITHUB_RETRY_MAX_DELAY_MS = Number.isFinite(retryMaxDelayRaw)
+  ? Math.max(0, retryMaxDelayRaw)
+  : 8000;
+
+function getErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const e = error as Record<string, unknown>;
+  const code = e.code;
+  if (typeof code === "string") return code;
+  const cause = e.cause;
+  if (cause && typeof cause === "object") {
+    const c = cause as Record<string, unknown>;
+    if (typeof c.code === "string") return c.code;
+  }
+  return undefined;
+}
+
+function getStatusCode(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const e = error as Record<string, unknown>;
+  if (typeof e.status === "number") return e.status;
+  const response = e.response;
+  if (response && typeof response === "object") {
+    const r = response as Record<string, unknown>;
+    if (typeof r.status === "number") return r.status;
+  }
+  return undefined;
+}
+
+function isRetryableError(error: unknown) {
+  const status = getStatusCode(error);
+  if (status && [408, 429, 500, 502, 503, 504].includes(status)) return true;
+
+  const code = getErrorCode(error);
+  if (
+    code &&
+    ["ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN"].includes(code)
+  ) {
+    return true;
+  }
+
+  if (error && typeof error === "object") {
+    const e = error as Record<string, unknown>;
+    if (e.name === "AbortError") return true;
+    if (typeof e.message === "string" && e.message.includes("fetch failed")) return true;
+  }
+
+  return false;
+}
+
+async function sleep(ms: number) {
+  if (ms <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetries<T>(fn: () => Promise<T>, context: string): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= GITHUB_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt === GITHUB_RETRY_ATTEMPTS || !isRetryableError(error)) {
+        throw error;
+      }
+
+      const backoff = Math.min(
+        GITHUB_RETRY_MAX_DELAY_MS,
+        GITHUB_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1)
+      );
+      const jitter = Math.floor(Math.random() * 200);
+      console.warn(`[GitHub] retry ${attempt}/${GITHUB_RETRY_ATTEMPTS} (${context})`);
+      await sleep(backoff + jitter);
+    }
+  }
+
+  throw lastError;
 }
 
 // Helper to get cached data or fetch fresh
@@ -89,13 +190,17 @@ export async function searchUsers(
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const response = await octokit.search.users({
-        q: query,
-        sort: "followers",
-        order,
-        per_page: perPage,
-        page,
-      });
+      const response = await withRetries(
+        () =>
+          octokit.search.users({
+            q: query,
+            sort: "followers",
+            order,
+            per_page: perPage,
+            page,
+          }),
+        `search:users:${minFollowers}-${maxFollowers ?? "plus"}:${page}:${order}`
+      );
 
       // Update rate limit info
       rateLimiter.updateFromHeaders(
@@ -124,13 +229,17 @@ export async function searchRepos(
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const response = await octokit.search.repos({
-        q: `language:${language} stars:>=${minStars}`,
-        sort: "stars",
-        order,
-        per_page: perPage,
-        page,
-      });
+      const response = await withRetries(
+        () =>
+          octokit.search.repos({
+            q: `language:${language} stars:>=${minStars}`,
+            sort: "stars",
+            order,
+            per_page: perPage,
+            page,
+          }),
+        `search:repos:${language}:${minStars}:${page}:${order}`
+      );
 
       rateLimiter.updateFromHeaders(
         response.headers as Record<string, string>,
@@ -152,7 +261,10 @@ export async function getUser(username: string) {
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const response = await octokit.users.getByUsername({ username });
+      const response = await withRetries(
+        () => octokit.users.getByUsername({ username }),
+        `rest:user:${username}`
+      );
 
       rateLimiter.updateFromHeaders(
         response.headers as Record<string, string>,
@@ -174,7 +286,10 @@ export async function getRepo(owner: string, repo: string) {
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const response = await octokit.repos.get({ owner, repo });
+      const response = await withRetries(
+        () => octokit.repos.get({ owner, repo }),
+        `rest:repo:${owner}/${repo}`
+      );
 
       rateLimiter.updateFromHeaders(
         response.headers as Record<string, string>,
@@ -196,7 +311,10 @@ export async function getContributorStats(owner: string, repo: string) {
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const response = await octokit.repos.getContributorsStats({ owner, repo });
+      const response = await withRetries(
+        () => octokit.repos.getContributorsStats({ owner, repo }),
+        `rest:contributors-stats:${owner}/${repo}`
+      );
 
       rateLimiter.updateFromHeaders(
         response.headers as Record<string, string>,
@@ -223,7 +341,10 @@ export async function getCodeFrequency(owner: string, repo: string) {
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const response = await octokit.repos.getCodeFrequencyStats({ owner, repo });
+      const response = await withRetries(
+        () => octokit.repos.getCodeFrequencyStats({ owner, repo }),
+        `rest:code-frequency:${owner}/${repo}`
+      );
 
       rateLimiter.updateFromHeaders(
         response.headers as Record<string, string>,
@@ -253,54 +374,61 @@ export async function getUserContributions(
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const query = `
-        query($username: String!, $from: DateTime!, $to: DateTime!) {
-          user(login: $username) {
-            contributionsCollection(from: $from, to: $to) {
-              totalCommitContributions
-              totalPullRequestContributions
-              totalPullRequestReviewContributions
-              totalIssueContributions
-              contributionCalendar {
-                totalContributions
-                weeks {
-                  contributionDays {
-                    contributionCount
-                    date
+      try {
+        const query = `
+          query($username: String!, $from: DateTime!, $to: DateTime!) {
+            user(login: $username) {
+              contributionsCollection(from: $from, to: $to) {
+                totalCommitContributions
+                totalPullRequestContributions
+                totalPullRequestReviewContributions
+                totalIssueContributions
+                contributionCalendar {
+                  totalContributions
+                  weeks {
+                    contributionDays {
+                      contributionCount
+                      date
+                    }
                   }
                 }
               }
             }
           }
-        }
-      `;
+        `;
 
-      const response = await graphqlWithAuth<{
-        user: {
-          contributionsCollection: {
-            totalCommitContributions: number;
-            totalPullRequestContributions: number;
-            totalPullRequestReviewContributions: number;
-            totalIssueContributions: number;
-            contributionCalendar: {
-              totalContributions: number;
-              weeks: Array<{
-                contributionDays: Array<{
-                  contributionCount: number;
-                  date: string;
-                }>;
-              }>;
-            };
-          };
-        };
-      }>(query, {
-        username,
-        from,
-        to,
-      });
+        const response = await withRetries(
+          () =>
+            graphqlWithAuth<{
+              user: {
+                contributionsCollection: {
+                  totalCommitContributions: number;
+                  totalPullRequestContributions: number;
+                  totalPullRequestReviewContributions: number;
+                  totalIssueContributions: number;
+                  contributionCalendar: {
+                    totalContributions: number;
+                    weeks: Array<{
+                      contributionDays: Array<{
+                        contributionCount: number;
+                        date: string;
+                      }>;
+                    }>;
+                  };
+                };
+              };
+            }>(query, {
+              username,
+              from,
+              to,
+            }),
+          `graphql:contributions:${username}:${from}:${to}`
+        );
 
-      await throttleGraphql();
-      return response.user.contributionsCollection;
+        return response.user.contributionsCollection;
+      } finally {
+        await throttleGraphql();
+      }
     },
     CACHE_TTL.CONTRIBUTION_DATA
   );
@@ -321,15 +449,19 @@ export async function getRepoPRs(
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const response = await octokit.pulls.list({
-        owner,
-        repo,
-        state,
-        per_page: perPage,
-        page,
-        sort: "updated",
-        direction: "desc",
-      });
+      const response = await withRetries(
+        () =>
+          octokit.pulls.list({
+            owner,
+            repo,
+            state,
+            per_page: perPage,
+            page,
+            sort: "updated",
+            direction: "desc",
+          }),
+        `rest:prs:${owner}/${repo}:${state}:${page}`
+      );
 
       rateLimiter.updateFromHeaders(
         response.headers as Record<string, string>,
@@ -357,15 +489,19 @@ export async function getRepoIssues(
   return getCachedOrFetch(
     cacheKey,
     async () => {
-      const response = await octokit.issues.listForRepo({
-        owner,
-        repo,
-        state,
-        per_page: perPage,
-        page,
-        sort: "updated",
-        direction: "desc",
-      });
+      const response = await withRetries(
+        () =>
+          octokit.issues.listForRepo({
+            owner,
+            repo,
+            state,
+            per_page: perPage,
+            page,
+            sort: "updated",
+            direction: "desc",
+          }),
+        `rest:issues:${owner}/${repo}:${state}:${page}`
+      );
 
       rateLimiter.updateFromHeaders(
         response.headers as Record<string, string>,
