@@ -70,49 +70,44 @@ export async function POST(request: Request) {
     ? usersPerBandRaw
     : null;
 
+  const effectiveBands =
+    type === "users" || type === "all"
+      ? resolveUserBands(usersPerBandOverride)
+      : USER_BANDS;
+
+  const samplingParams =
+    type === "users" || type === "all"
+      ? JSON.stringify({
+          baselineYears: BASELINE_YEARS,
+          baselineMinContributions: BASELINE_MIN_CONTRIBUTIONS,
+          bands: effectiveBands,
+          usersPerBand: usersPerBandOverride ?? USERS_PER_BAND_ENV,
+          perPage: 100,
+          pagesPerOrder: 2,
+          orders: ["desc", "asc"],
+        })
+      : null;
+
+  const job = await prisma.syncJob.create({
+    data: {
+      jobType: type,
+      status: "running",
+      startedAt: new Date(),
+      samplingSeed: type === "users" || type === "all" ? samplingSeed : null,
+      samplingParams,
+    },
+  });
+
+  let itemsProcessed = 0;
   try {
-    const effectiveBands =
-      type === "users" || type === "all"
-        ? resolveUserBands(usersPerBandOverride)
-        : USER_BANDS;
-    const samplingParams =
-      type === "users" || type === "all"
-        ? JSON.stringify({
-            baselineYears: BASELINE_YEARS,
-            baselineMinContributions: BASELINE_MIN_CONTRIBUTIONS,
-            bands: effectiveBands,
-            usersPerBand: usersPerBandOverride ?? USERS_PER_BAND_ENV,
-            perPage: 100,
-            pagesPerOrder: 2,
-            orders: ["desc", "asc"],
-          })
-        : null;
-
-    // Create sync job
-    const job = await prisma.syncJob.create({
-      data: {
-        jobType: type,
-        status: "running",
-        startedAt: new Date(),
-        samplingSeed:
-          type === "users" || type === "all" ? samplingSeed : null,
-        samplingParams,
-      },
-    });
-
-    let itemsProcessed = 0;
-
-    // Sync users
     if (type === "users" || type === "all") {
       itemsProcessed += await syncUsers(samplingSeed, effectiveBands);
     }
 
-    // Sync repos
     if (type === "repos" || type === "all") {
       itemsProcessed += await syncRepos();
     }
 
-    // Update job status
     await prisma.syncJob.update({
       where: { id: job.id },
       data: {
@@ -131,6 +126,20 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("Sync error:", error);
+    try {
+      await prisma.syncJob.update({
+        where: { id: job.id },
+        data: {
+          status: "failed",
+          completedAt: new Date(),
+          itemsProcessed,
+          errorMessage: error instanceof Error ? error.message : "Unknown error",
+        },
+      });
+    } catch (dbError) {
+      console.error("Failed to update sync job status after error:", dbError);
+    }
+
     return NextResponse.json(
       {
         error: "Sync failed",
@@ -193,8 +202,12 @@ async function syncUsers(
     );
 
     for (const user of candidates) {
-      const ok = await upsertUser(user, band.tier);
-      if (ok) processed++;
+      try {
+        const ok = await upsertUser(user, band.tier);
+        if (ok) processed++;
+      } catch (error) {
+        console.error(`Failed to sync user ${user.login}:`, error);
+      }
     }
   }
 
@@ -265,7 +278,13 @@ async function upsertUser(
   tier: string
 ): Promise<boolean> {
   // Get full user details
-  const userDetails = await getUser(searchResult.login);
+  let userDetails: Awaited<ReturnType<typeof getUser>>;
+  try {
+    userDetails = await getUser(searchResult.login);
+  } catch (error) {
+    console.error(`Failed to fetch user profile for ${searchResult.login}:`, error);
+    return false;
+  }
 
   // Skip orgs and obvious bots
   if (userDetails.type !== "User" || searchResult.login.endsWith("[bot]")) {
@@ -667,11 +686,12 @@ async function processRepoPRs(repoGithubId: number, prs: RepoPullRequest[]) {
     addToDay(pr.closed_at, (e) => { e.closed += 1; });
 
     if (pr.merged_at) {
-      addToDay(pr.merged_at, (e) => {
+      const mergedAt = pr.merged_at;
+      addToDay(mergedAt, (e) => {
         e.merged += 1;
         if (pr.created_at) {
           const hours =
-            (new Date(pr.merged_at).getTime() - new Date(pr.created_at).getTime()) /
+            (new Date(mergedAt).getTime() - new Date(pr.created_at).getTime()) /
             (1000 * 60 * 60);
           if (Number.isFinite(hours)) {
             e.mergeHoursTotal += hours;
@@ -752,11 +772,12 @@ async function processRepoIssues(repoGithubId: number, issues: RepoIssue[]) {
     addToDay(issue.created_at, (e) => { e.opened += 1; });
 
     if (issue.closed_at) {
-      addToDay(issue.closed_at, (e) => {
+      const closedAt = issue.closed_at;
+      addToDay(closedAt, (e) => {
         e.closed += 1;
         if (issue.created_at) {
           const hours =
-            (new Date(issue.closed_at).getTime() - new Date(issue.created_at).getTime()) /
+            (new Date(closedAt).getTime() - new Date(issue.created_at).getTime()) /
             (1000 * 60 * 60);
           if (Number.isFinite(hours)) {
             e.resolutionHoursTotal += hours;
