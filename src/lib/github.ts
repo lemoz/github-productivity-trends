@@ -379,6 +379,100 @@ export async function getRepoIssues(
   );
 }
 
+// Get repository README text (decoded)
+export async function getRepoReadme(owner: string, repo: string) {
+  await rateLimiter.waitIfNeeded("rest");
+
+  const cacheKey = `readme:${owner}/${repo}`;
+
+  return getCachedOrFetch(
+    cacheKey,
+    async () => {
+      try {
+        const response = await octokit.repos.getReadme({ owner, repo });
+
+        rateLimiter.updateFromHeaders(
+          response.headers as Record<string, string>,
+          "rest"
+        );
+
+        const content = response.data.content
+          ? Buffer.from(response.data.content, "base64").toString("utf8")
+          : "";
+        return content;
+      } catch {
+        return null;
+      }
+    },
+    CACHE_TTL.REPO_STATS
+  );
+}
+
+// List files at the repository root (names only)
+export async function listRepoRootFiles(owner: string, repo: string) {
+  await rateLimiter.waitIfNeeded("rest");
+
+  const cacheKey = `contents:root:${owner}/${repo}`;
+
+  return getCachedOrFetch(
+    cacheKey,
+    async () => {
+      try {
+        const response = await octokit.repos.getContent({
+          owner,
+          repo,
+          path: "",
+        });
+
+        rateLimiter.updateFromHeaders(
+          response.headers as Record<string, string>,
+          "rest"
+        );
+
+        if (Array.isArray(response.data)) {
+          return response.data.map((item) => item.name);
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    },
+    CACHE_TTL.REPO_STATS
+  );
+}
+
+export async function listRepoDirFiles(owner: string, repo: string, path: string) {
+  await rateLimiter.waitIfNeeded("rest");
+
+  const cacheKey = `contents:${path}:${owner}/${repo}`;
+
+  return getCachedOrFetch(
+    cacheKey,
+    async () => {
+      try {
+        const response = await octokit.repos.getContent({
+          owner,
+          repo,
+          path,
+        });
+
+        rateLimiter.updateFromHeaders(
+          response.headers as Record<string, string>,
+          "rest"
+        );
+
+        if (Array.isArray(response.data)) {
+          return response.data.map((item) => item.name);
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    },
+    CACHE_TTL.REPO_STATS
+  );
+}
+
 // Export rate limiter status for monitoring
 export function getRateLimitStatus() {
   return rateLimiter.getStatus();
