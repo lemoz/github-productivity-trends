@@ -34,6 +34,11 @@ const CACHE_TTL = {
   CONTRIBUTION_DATA: 1 * 60 * 60, // 1 hour
 };
 
+const apiCacheDisabled = (() => {
+  const raw = (process.env.DISABLE_API_CACHE ?? process.env.API_CACHE_DISABLED ?? "").trim();
+  return ["1", "true", "yes"].includes(raw.toLowerCase());
+})();
+
 const graphqlThrottleRaw = Number(process.env.GRAPHQL_THROTTLE_MS ?? 800);
 const GRAPHQL_THROTTLE_MS = Number.isFinite(graphqlThrottleRaw)
   ? graphqlThrottleRaw
@@ -141,6 +146,10 @@ async function getCachedOrFetch<T>(
   fetchFn: () => Promise<T>,
   ttlSeconds: number
 ): Promise<T> {
+  if (apiCacheDisabled || ttlSeconds <= 0) {
+    return fetchFn();
+  }
+
   // Check cache first
   const cached = await prisma.aPICache.findUnique({
     where: { cacheKey },

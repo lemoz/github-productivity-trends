@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import {
   searchUsers,
   searchRepos,
@@ -45,6 +46,76 @@ const USERS_PER_BAND_ENV = Number.isFinite(usersPerBandEnvRaw)
   ? usersPerBandEnvRaw
   : null;
 
+const userSearchPerPageEnvRaw = process.env.USER_SEARCH_PER_PAGE
+  ? Number(process.env.USER_SEARCH_PER_PAGE)
+  : NaN;
+const USER_SEARCH_PER_PAGE_ENV = Number.isFinite(userSearchPerPageEnvRaw)
+  ? userSearchPerPageEnvRaw
+  : 100;
+
+const userSearchPagesPerOrderEnvRaw = process.env.USER_SEARCH_PAGES_PER_ORDER
+  ? Number(process.env.USER_SEARCH_PAGES_PER_ORDER)
+  : NaN;
+const USER_SEARCH_PAGES_PER_ORDER_ENV = Number.isFinite(userSearchPagesPerOrderEnvRaw)
+  ? userSearchPagesPerOrderEnvRaw
+  : 2;
+
+const repoLanguageCountEnvRaw = process.env.REPO_LANGUAGE_COUNT
+  ? Number(process.env.REPO_LANGUAGE_COUNT)
+  : NaN;
+const REPO_LANGUAGE_COUNT_ENV = Number.isFinite(repoLanguageCountEnvRaw)
+  ? repoLanguageCountEnvRaw
+  : 5;
+
+const reposPerLanguageEnvRaw = process.env.REPOS_PER_LANGUAGE
+  ? Number(process.env.REPOS_PER_LANGUAGE)
+  : NaN;
+const REPOS_PER_LANGUAGE_ENV = Number.isFinite(reposPerLanguageEnvRaw)
+  ? reposPerLanguageEnvRaw
+  : 10;
+
+const repoMinStarsEnvRaw = process.env.REPO_MIN_STARS
+  ? Number(process.env.REPO_MIN_STARS)
+  : NaN;
+const REPO_MIN_STARS_ENV = Number.isFinite(repoMinStarsEnvRaw)
+  ? repoMinStarsEnvRaw
+  : 5000;
+
+const repoPrPagesEnvRaw = process.env.REPO_PR_PAGES
+  ? Number(process.env.REPO_PR_PAGES)
+  : NaN;
+const REPO_PR_PAGES_ENV = Number.isFinite(repoPrPagesEnvRaw) ? repoPrPagesEnvRaw : 3;
+
+const repoIssuePagesEnvRaw = process.env.REPO_ISSUE_PAGES
+  ? Number(process.env.REPO_ISSUE_PAGES)
+  : NaN;
+const REPO_ISSUE_PAGES_ENV = Number.isFinite(repoIssuePagesEnvRaw)
+  ? repoIssuePagesEnvRaw
+  : 3;
+
+function clampInt(n: number, min: number, max: number) {
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+async function upsertUserContributionMetricsBatch(
+  rows: Array<{ date: Date; userId: string; contributionCount: number }>
+) {
+  if (rows.length === 0) return;
+  await prisma.$executeRaw(
+    Prisma.sql`
+      INSERT INTO UserContributionMetrics (date, userId, contributionCount)
+      VALUES ${Prisma.join(
+        rows.map(
+          (r) => Prisma.sql`(${r.date}, ${r.userId}, ${r.contributionCount})`
+        )
+      )}
+      ON CONFLICT(date, userId)
+      DO UPDATE SET contributionCount = excluded.contributionCount
+    `
+  );
+}
+
 function resolveUserBands(usersPerBandOverride: number | null) {
   if (usersPerBandOverride != null) {
     return USER_BANDS.map((b) => ({ ...b, target: usersPerBandOverride }));
@@ -59,6 +130,8 @@ function resolveUserBands(usersPerBandOverride: number | null) {
 export async function POST(request: Request) {
   const { searchParams } = new URL(request.url);
   const type = searchParams.get("type") || "all"; // users, repos, all
+  const shouldSyncUsers = type === "users" || type === "all";
+  const shouldSyncRepos = type === "repos" || type === "all";
   const seedParam = searchParams.get("seed");
   const samplingSeedRaw = seedParam ? Number(seedParam) : DEFAULT_SAMPLING_SEED;
   const samplingSeed = Number.isFinite(samplingSeedRaw)
@@ -70,42 +143,99 @@ export async function POST(request: Request) {
     ? usersPerBandRaw
     : null;
 
+  const userPerPageParam = searchParams.get("userPerPage");
+  const userPerPageRaw = userPerPageParam ? Number(userPerPageParam) : USER_SEARCH_PER_PAGE_ENV;
+  const userPerPage = clampInt(userPerPageRaw, 1, 100);
+
+  const userPagesPerOrderParam = searchParams.get("userPagesPerOrder");
+  const userPagesPerOrderRaw = userPagesPerOrderParam
+    ? Number(userPagesPerOrderParam)
+    : USER_SEARCH_PAGES_PER_ORDER_ENV;
+  const userPagesPerOrder = clampInt(userPagesPerOrderRaw, 1, 10);
+
+  const repoLanguageCountParam = searchParams.get("repoLanguageCount");
+  const repoLanguageCountRaw = repoLanguageCountParam
+    ? Number(repoLanguageCountParam)
+    : REPO_LANGUAGE_COUNT_ENV;
+  const repoLanguageCount = clampInt(repoLanguageCountRaw, 1, TRACKED_LANGUAGES.length);
+
+  const reposPerLanguageParam = searchParams.get("reposPerLanguage");
+  const reposPerLanguageRaw = reposPerLanguageParam
+    ? Number(reposPerLanguageParam)
+    : REPOS_PER_LANGUAGE_ENV;
+  const reposPerLanguage = clampInt(reposPerLanguageRaw, 1, 1000);
+
+  const repoMinStarsParam = searchParams.get("repoMinStars");
+  const repoMinStarsRaw = repoMinStarsParam ? Number(repoMinStarsParam) : REPO_MIN_STARS_ENV;
+  const repoMinStars = Number.isFinite(repoMinStarsRaw) ? Math.max(0, repoMinStarsRaw) : REPO_MIN_STARS_ENV;
+
+  const repoPrPagesParam = searchParams.get("repoPRPages");
+  const repoPrPagesRaw = repoPrPagesParam ? Number(repoPrPagesParam) : REPO_PR_PAGES_ENV;
+  const repoPrPages = clampInt(repoPrPagesRaw, 0, 50);
+
+  const repoIssuePagesParam = searchParams.get("repoIssuePages");
+  const repoIssuePagesRaw = repoIssuePagesParam
+    ? Number(repoIssuePagesParam)
+    : REPO_ISSUE_PAGES_ENV;
+  const repoIssuePages = clampInt(repoIssuePagesRaw, 0, 50);
+
   const effectiveBands =
-    type === "users" || type === "all"
+    shouldSyncUsers
       ? resolveUserBands(usersPerBandOverride)
       : USER_BANDS;
 
-  const samplingParams =
-    type === "users" || type === "all"
-      ? JSON.stringify({
-          baselineYears: BASELINE_YEARS,
-          baselineMinContributions: BASELINE_MIN_CONTRIBUTIONS,
-          bands: effectiveBands,
-          usersPerBand: usersPerBandOverride ?? USERS_PER_BAND_ENV,
-          perPage: 100,
-          pagesPerOrder: 2,
-          orders: ["desc", "asc"],
-        })
-      : null;
+  const samplingParams = (shouldSyncUsers || shouldSyncRepos)
+    ? JSON.stringify({
+        users: shouldSyncUsers
+          ? {
+              baselineYears: BASELINE_YEARS,
+              baselineMinContributions: BASELINE_MIN_CONTRIBUTIONS,
+              bands: effectiveBands,
+              usersPerBand: usersPerBandOverride ?? USERS_PER_BAND_ENV,
+              perPage: userPerPage,
+              pagesPerOrder: userPagesPerOrder,
+              orders: ["desc", "asc"],
+            }
+          : null,
+        repos: shouldSyncRepos
+          ? {
+              languages: TRACKED_LANGUAGES.slice(0, repoLanguageCount),
+              reposPerLanguage,
+              minStars: repoMinStars,
+              prPages: repoPrPages,
+              issuePages: repoIssuePages,
+            }
+          : null,
+      })
+    : null;
 
   const job = await prisma.syncJob.create({
     data: {
       jobType: type,
       status: "running",
       startedAt: new Date(),
-      samplingSeed: type === "users" || type === "all" ? samplingSeed : null,
+      samplingSeed: shouldSyncUsers ? samplingSeed : null,
       samplingParams,
     },
   });
 
   let itemsProcessed = 0;
   try {
-    if (type === "users" || type === "all") {
-      itemsProcessed += await syncUsers(samplingSeed, effectiveBands);
+    if (shouldSyncUsers) {
+      itemsProcessed += await syncUsers(samplingSeed, effectiveBands, {
+        perPage: userPerPage,
+        pagesPerOrder: userPagesPerOrder,
+      });
     }
 
-    if (type === "repos" || type === "all") {
-      itemsProcessed += await syncRepos();
+    if (shouldSyncRepos) {
+      itemsProcessed += await syncRepos({
+        languageCount: repoLanguageCount,
+        reposPerLanguage,
+        minStars: repoMinStars,
+        prPages: repoPrPages,
+        issuePages: repoIssuePages,
+      });
     }
 
     await prisma.syncJob.update({
@@ -184,9 +314,12 @@ export async function GET() {
 // Sample users across tiers - 1000 users total
 async function syncUsers(
   baseSeed: number,
-  bands: typeof USER_BANDS
+  bands: typeof USER_BANDS,
+  options?: { perPage?: number; pagesPerOrder?: number }
 ): Promise<number> {
   let processed = 0;
+  const perPage = clampInt(options?.perPage ?? 100, 1, 100);
+  const pagesPerOrder = clampInt(options?.pagesPerOrder ?? 2, 1, 10);
 
   for (const band of bands) {
     const bandSeed = makeBandSeed(
@@ -198,7 +331,9 @@ async function syncUsers(
       band.minFollowers,
       band.maxFollowers,
       band.target,
-      bandSeed
+      bandSeed,
+      perPage,
+      pagesPerOrder
     );
 
     for (const user of candidates) {
@@ -330,42 +465,41 @@ async function upsertUser(
     if (startDate > now) return;
     const effectiveEndDate = endDate > now ? now : endDate;
 
-    const contributions = await getUserContributions(
-      searchResult.login,
-      startDate.toISOString(),
-      effectiveEndDate.toISOString()
-    );
+	    const contributions = await getUserContributions(
+	      searchResult.login,
+	      startDate.toISOString(),
+	      effectiveEndDate.toISOString()
+	    );
 
-    for (const week of contributions.contributionCalendar.weeks) {
-      for (const day of week.contributionDays) {
-        if (day.contributionCount > 0) {
-          const dayDate = new Date(day.date);
+	    const rows: Array<{
+	      date: Date;
+	      userId: string;
+	      contributionCount: number;
+	    }> = [];
 
-          await prisma.userContributionMetrics.upsert({
-            where: {
-              date_userId: {
-                date: dayDate,
-                userId: user.id,
-              },
-            },
-            create: {
-              date: dayDate,
-              userId: user.id,
-              contributionCount: day.contributionCount,
-            },
-            update: {
-              contributionCount: day.contributionCount,
-            },
-          });
+	    for (const week of contributions.contributionCalendar.weeks) {
+	      for (const day of week.contributionDays) {
+	        if (day.contributionCount > 0) {
+	          const dayDate = new Date(day.date);
+	          rows.push({
+	            date: dayDate,
+	            userId: user.id,
+	            contributionCount: day.contributionCount,
+	          });
 
-          totalContributions += day.contributionCount;
-          if (baselineYears.has(year)) {
-            baselineContributions += day.contributionCount;
-          }
-        }
-      }
-    }
-  };
+	          totalContributions += day.contributionCount;
+	          if (baselineYears.has(year)) {
+	            baselineContributions += day.contributionCount;
+	          }
+	        }
+	      }
+	    }
+
+	    const chunkSize = 200;
+	    for (let i = 0; i < rows.length; i += chunkSize) {
+	      await upsertUserContributionMetricsBatch(rows.slice(i, i + chunkSize));
+	    }
+	  };
 
   let baselineFetchFailed = false;
   for (const year of BASELINE_YEARS) {
@@ -406,12 +540,25 @@ async function upsertUser(
 }
 
 // Sample repos across languages
-async function syncRepos(): Promise<number> {
+async function syncRepos(options?: {
+  languageCount?: number;
+  reposPerLanguage?: number;
+  minStars?: number;
+  prPages?: number;
+  issuePages?: number;
+}): Promise<number> {
   let count = 0;
 
-  for (const language of TRACKED_LANGUAGES.slice(0, 5)) {
-    // Top 5 languages
-    const repos = await searchRepos(language, 5000, 10);
+  const languageCount = clampInt(options?.languageCount ?? 5, 1, TRACKED_LANGUAGES.length);
+  const reposPerLanguage = clampInt(options?.reposPerLanguage ?? 10, 1, 1000);
+  const minStars = Number.isFinite(options?.minStars ?? NaN)
+    ? Math.max(0, options?.minStars ?? 0)
+    : 5000;
+  const prPages = clampInt(options?.prPages ?? 3, 0, 50);
+  const issuePages = clampInt(options?.issuePages ?? 3, 0, 50);
+
+  for (const language of TRACKED_LANGUAGES.slice(0, languageCount)) {
+    const repos = await fetchReposForLanguage(language, minStars, reposPerLanguage);
 
     for (const repo of repos) {
       // Skip repos without owner
@@ -444,7 +591,7 @@ async function syncRepos(): Promise<number> {
 
       // Collect recent PR and issue data for flow metrics
       try {
-        const prs = await fetchPagedPRs(repo.owner.login, repo.name);
+        const prs = await fetchPagedPRs(repo.owner.login, repo.name, prPages);
         if (prs.length > 0) {
           await processRepoPRs(repo.id, prs);
         }
@@ -453,7 +600,7 @@ async function syncRepos(): Promise<number> {
       }
 
       try {
-        const issues = await fetchPagedIssues(repo.owner.login, repo.name);
+        const issues = await fetchPagedIssues(repo.owner.login, repo.name, issuePages);
         if (issues.length > 0) {
           await processRepoIssues(repo.id, issues);
         }
@@ -464,6 +611,21 @@ async function syncRepos(): Promise<number> {
   }
 
   return count;
+}
+
+async function fetchReposForLanguage(language: string, minStars: number, target: number) {
+  const perPage = clampInt(Math.min(100, target), 1, 100);
+  const pages = clampInt(Math.ceil(target / perPage), 1, 10);
+  const results: Array<Awaited<ReturnType<typeof searchRepos>>[number]> = [];
+
+  for (let page = 1; page <= pages; page++) {
+    const pageResults = await searchRepos(language, minStars, perPage, page);
+    results.push(...pageResults);
+    if (pageResults.length < perPage) break;
+  }
+
+  const deduped = Array.from(new Map(results.map((r) => [r.id, r])).values());
+  return deduped.slice(0, target);
 }
 
 async function upsertRepo(
@@ -516,47 +678,55 @@ async function processRepoStats(
 
   if (!repo) return;
 
-  // Process weekly data into daily metrics
+  const weekMap = new Map<number, { commits: number; added: number; removed: number }>();
   for (const contributor of stats) {
     if (!contributor.author) continue;
-
     for (const week of contributor.weeks) {
-      if (!week.c || week.c === 0) continue; // Skip weeks with no commits
-      if (!week.w) continue; // Skip if no timestamp
+      if (!week.w) continue;
+      if (!week.c || week.c === 0) continue;
 
-      const weekDate = new Date(week.w * 1000);
+      const key = week.w;
+      const existing = weekMap.get(key) || { commits: 0, added: 0, removed: 0 };
+      weekMap.set(key, {
+        commits: existing.commits + (week.c || 0),
+        added: existing.added + (week.a || 0),
+        removed: existing.removed + (week.d || 0),
+      });
+    }
+  }
 
-      // Find existing record or create new one
-      const existing = await prisma.commitMetrics.findFirst({
-        where: {
+  const sortedWeeks = Array.from(weekMap.entries()).sort((a, b) => a[0] - b[0]);
+  for (const [weekTs, totals] of sortedWeeks) {
+    const weekDate = new Date(weekTs * 1000);
+    const existing = await prisma.commitMetrics.findFirst({
+      where: {
+        date: weekDate,
+        repoId: repo.id,
+        language: repo.primaryLanguage,
+        userId: null,
+      },
+    });
+
+    if (existing) {
+      await prisma.commitMetrics.update({
+        where: { id: existing.id },
+        data: {
+          commitCount: totals.commits,
+          linesAdded: totals.added,
+          linesRemoved: totals.removed,
+        },
+      });
+    } else {
+      await prisma.commitMetrics.create({
+        data: {
           date: weekDate,
           repoId: repo.id,
           language: repo.primaryLanguage,
-          userId: null,
+          commitCount: totals.commits,
+          linesAdded: totals.added,
+          linesRemoved: totals.removed,
         },
       });
-
-      if (existing) {
-        await prisma.commitMetrics.update({
-          where: { id: existing.id },
-          data: {
-            commitCount: { increment: week.c || 0 },
-            linesAdded: { increment: week.a || 0 },
-            linesRemoved: { increment: week.d || 0 },
-          },
-        });
-      } else {
-        await prisma.commitMetrics.create({
-          data: {
-            date: weekDate,
-            repoId: repo.id,
-            language: repo.primaryLanguage,
-            commitCount: week.c || 0,
-            linesAdded: week.a || 0,
-            linesRemoved: week.d || 0,
-          },
-        });
-      }
     }
   }
 }
