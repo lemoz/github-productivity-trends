@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "export:panel": "node scripts/export-panel.mjs"
   },
   "dependencies": {
     "@octokit/graphql": "^9.0.3",
