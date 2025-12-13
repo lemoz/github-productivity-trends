@@ -99,15 +99,15 @@ function clampInt(n: number, min: number, max: number) {
 }
 
 async function upsertUserContributionMetricsBatch(
-  rows: Array<{ date: Date; userId: string; contributionCount: number }>
+  rows: Array<{ id: string; date: Date; userId: string; contributionCount: number }>
 ) {
   if (rows.length === 0) return;
   await prisma.$executeRaw(
     Prisma.sql`
-      INSERT INTO UserContributionMetrics (date, userId, contributionCount)
+      INSERT INTO UserContributionMetrics (id, date, userId, contributionCount)
       VALUES ${Prisma.join(
         rows.map(
-          (r) => Prisma.sql`(${r.date}, ${r.userId}, ${r.contributionCount})`
+          (r) => Prisma.sql`(${r.id}, ${r.date}, ${r.userId}, ${r.contributionCount})`
         )
       )}
       ON CONFLICT(date, userId)
@@ -472,6 +472,7 @@ async function upsertUser(
 	    );
 
 	    const rows: Array<{
+	      id: string;
 	      date: Date;
 	      userId: string;
 	      contributionCount: number;
@@ -482,6 +483,7 @@ async function upsertUser(
 	        if (day.contributionCount > 0) {
 	          const dayDate = new Date(day.date);
 	          rows.push({
+	            id: `${user.id}:${day.date}`,
 	            date: dayDate,
 	            userId: user.id,
 	            contributionCount: day.contributionCount,
