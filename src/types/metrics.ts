@@ -5,6 +5,13 @@ export interface TimeSeriesDataPoint {
   // Optional breakdown
   byLanguage?: Record<string, number>;
   byTier?: Record<string, number>;
+  // Optional distribution
+  p25?: number;
+  p50?: number;
+  p75?: number;
+  byTierP25?: Record<string, number>;
+  byTierP50?: Record<string, number>;
+  byTierP75?: Record<string, number>;
 }
 
 // Global metrics summary
@@ -38,6 +45,8 @@ export interface GlobalMetrics {
 // Trend data for dashboard charts
 export interface TrendData {
   commits: TimeSeriesDataPoint[];
+  activeDayShare: TimeSeriesDataPoint[];
+  contributionsPerActiveDay: TimeSeriesDataPoint[];
   linesOfCode: TimeSeriesDataPoint[];
   prMergeTime: TimeSeriesDataPoint[];
   issueResolution: TimeSeriesDataPoint[];

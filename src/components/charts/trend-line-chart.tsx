@@ -16,7 +16,6 @@ import { format, parseISO } from "date-fns";
 import {
   AI_MILESTONES,
   MILESTONE_COLORS,
-  type AIMilestone,
 } from "@/config/ai-milestones";
 import type { TimeSeriesDataPoint } from "@/types/metrics";
 
