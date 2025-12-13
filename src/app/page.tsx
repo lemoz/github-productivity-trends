@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TrendLineChart } from "@/components/charts/trend-line-chart";
 import { StatsCards } from "@/components/dashboard/stats-cards";
+import { FindingsCard } from "@/components/dashboard/findings-card";
 import { SyncButton } from "@/components/dashboard/sync-button";
 import type { GlobalMetrics, TrendData, SyncStatus } from "@/types/metrics";
 
@@ -145,6 +146,11 @@ export default function Dashboard() {
           </Tabs>
         </section>
 
+        {/* Findings */}
+        <section className="mt-8">
+          <FindingsCard />
+        </section>
+
         {/* AI Milestones Timeline */}
         <section className="mt-8">
           <Card>
@@ -185,6 +191,7 @@ export default function Dashboard() {
                 not direct adoption signals.
               </p>
               <p className="mt-2 text-xs text-gray-500">
+                Charts default to complete months only (the current partial month is excluded).
                 Results are correlational and based on public data only.
               </p>
             </CardContent>
