@@ -23,6 +23,8 @@ model SampledUser {
   followers          Int      @default(0)
   totalContributions Int      @default(0)
   baselineContributions Int   @default(0) // 2020-2021 contributions
+  aiAdoptionFirstSeenAt DateTime?
+  aiAdoptionScore    Float    @default(0)
   primaryLanguage    String?
 
   lastSyncedAt       DateTime?
@@ -32,6 +34,7 @@ model SampledUser {
   commitMetrics            CommitMetrics[]
   prMetrics                PRMetrics[]
   userContributionMetrics  UserContributionMetrics[]
+  aiSignals                AISignal[]
 }
 
 // ========== Sampled Repositories ==========
@@ -48,6 +51,9 @@ model SampledRepo {
   forks           Int      @default(0)
   openIssues      Int      @default(0)
 
+  aiAdoptionFirstSeenAt DateTime?
+  aiAdoptionScore    Float    @default(0)
+
   lastSyncedAt    DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -55,6 +61,7 @@ model SampledRepo {
   commitMetrics   CommitMetrics[]
   prMetrics       PRMetrics[]
   issueMetrics    IssueMetrics[]
+  aiSignals       AISignal[]
 }
 
 // ========== Commit Metrics (Daily) ==========
@@ -217,4 +224,29 @@ model UserContributionMetrics {
   @@unique([date, userId])
   @@index([date])
   @@index([userId])
+}
+
+// ========== AI Adoption Signals ==========
+
+model AISignal {
+  id           String   @id @default(uuid())
+  signalType   String   // e.g. "copilot_mention", "chatgpt_mention", "ai_config_file"
+  source       String   // "pr_text", "readme", "config"
+  firstSeenAt  DateTime
+  lastSeenAt   DateTime
+  occurrences  Int      @default(1)
+  examples     String?  // JSON string of small text/file examples
+
+  userId       String?
+  user         SampledUser? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  repoId       String?
+  repo         SampledRepo? @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([signalType])
+  @@index([userId])
+  @@index([repoId])
 }
