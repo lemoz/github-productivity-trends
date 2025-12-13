@@ -7,13 +7,33 @@ import { TrendLineChart } from "@/components/charts/trend-line-chart";
 import { StatsCards } from "@/components/dashboard/stats-cards";
 import { FindingsCard } from "@/components/dashboard/findings-card";
 import { SyncButton } from "@/components/dashboard/sync-button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { GlobalMetrics, TrendData, SyncStatus } from "@/types/metrics";
+
+type ContributionMetric =
+  | "mean"
+  | "median"
+  | "p25"
+  | "p75"
+  | "activeDayShare"
+  | "contributionsPerActiveDay";
+
+type TierOption = "all" | "top" | "mid" | "casual";
 
 export default function Dashboard() {
   const [metrics, setMetrics] = useState<GlobalMetrics | null>(null);
   const [trends, setTrends] = useState<TrendData | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [contributionMetric, setContributionMetric] =
+    useState<ContributionMetric>("mean");
+  const [tier, setTier] = useState<TierOption>("all");
 
   const fetchData = async () => {
     setIsLoading(true);
@@ -39,6 +59,133 @@ export default function Dashboard() {
   useEffect(() => {
     fetchData();
   }, []);
+
+  const contributionChart = (() => {
+    const baseSeries =
+      contributionMetric === "activeDayShare"
+        ? trends?.activeDayShare || []
+        : contributionMetric === "contributionsPerActiveDay"
+          ? trends?.contributionsPerActiveDay || []
+          : trends?.commits || [];
+
+    const data = baseSeries.map((point) => {
+      const tierKey = tier === "all" ? null : tier;
+
+      if (contributionMetric === "activeDayShare") {
+        return {
+          date: point.date,
+          value: tierKey ? point.byTier?.[tierKey] ?? 0 : point.value,
+        };
+      }
+
+      if (contributionMetric === "contributionsPerActiveDay") {
+        return {
+          date: point.date,
+          value: tierKey ? point.byTier?.[tierKey] ?? 0 : point.value,
+        };
+      }
+
+      if (contributionMetric === "median") {
+        return {
+          date: point.date,
+          value: tierKey
+            ? point.byTierP50?.[tierKey] ?? point.byTier?.[tierKey] ?? 0
+            : point.p50 ?? point.value,
+        };
+      }
+
+      if (contributionMetric === "p25") {
+        return {
+          date: point.date,
+          value: tierKey
+            ? point.byTierP25?.[tierKey] ?? point.byTier?.[tierKey] ?? 0
+            : point.p25 ?? point.value,
+        };
+      }
+
+      if (contributionMetric === "p75") {
+        return {
+          date: point.date,
+          value: tierKey
+            ? point.byTierP75?.[tierKey] ?? point.byTier?.[tierKey] ?? 0
+            : point.p75 ?? point.value,
+        };
+      }
+
+      // mean
+      return {
+        date: point.date,
+        value: tierKey ? point.byTier?.[tierKey] ?? 0 : point.value,
+      };
+    });
+
+    const tierLabel =
+      tier === "all"
+        ? "All users"
+        : tier === "top"
+          ? "Top tier"
+          : tier === "mid"
+            ? "Mid tier"
+            : "Casual tier";
+
+    if (contributionMetric === "activeDayShare") {
+      return {
+        data,
+        title: `Active-Day Share (${tierLabel})`,
+        yAxisLabel: "Share of User-Days",
+        color: "#0ea5e9",
+        valueFormatter: (v: number) => `${(v * 100).toFixed(1)}%`,
+      };
+    }
+
+    if (contributionMetric === "contributionsPerActiveDay") {
+      return {
+        data,
+        title: `Contributions per Active Day (${tierLabel})`,
+        yAxisLabel: "Contribs/Active Day",
+        color: "#8b5cf6",
+        valueFormatter: (v: number) => v.toFixed(1),
+      };
+    }
+
+    if (contributionMetric === "median") {
+      return {
+        data,
+        title: `Median Contributions per User per Day (${tierLabel})`,
+        yAxisLabel: "Contributions/Day",
+        color: "#3b82f6",
+        valueFormatter: (v: number) => v.toFixed(2),
+      };
+    }
+
+    if (contributionMetric === "p25") {
+      return {
+        data,
+        title: `25th Percentile Contributions per User per Day (${tierLabel})`,
+        yAxisLabel: "Contributions/Day",
+        color: "#3b82f6",
+        valueFormatter: (v: number) => v.toFixed(2),
+      };
+    }
+
+    if (contributionMetric === "p75") {
+      return {
+        data,
+        title: `75th Percentile Contributions per User per Day (${tierLabel})`,
+        yAxisLabel: "Contributions/Day",
+        color: "#3b82f6",
+        valueFormatter: (v: number) => v.toFixed(2),
+      };
+    }
+
+    return {
+      data,
+      title: `Average Contributions per User per Day (${tierLabel})`,
+      yAxisLabel: "Contributions/Day",
+      color: "#3b82f6",
+      valueFormatter: (v: number) => v.toFixed(2),
+    };
+  })();
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -84,21 +231,64 @@ export default function Dashboard() {
               </TabsList>
             </div>
 
-            <Card>
-              <CardContent className="pt-6">
-                <TabsContent value="commits" className="mt-0">
-                  {isLoading ? (
-                    <ChartSkeleton />
-                  ) : (
-                    <TrendLineChart
-                      data={trends?.commits || []}
-                      title="Average Contributions Per User Per Day"
-                      yAxisLabel="Contributions/Day"
-                      color="#3b82f6"
-                      valueFormatter={(v) => v.toFixed(1)}
-                    />
-                  )}
-                </TabsContent>
+	            <Card>
+	              <CardContent className="pt-6">
+	                <TabsContent value="commits" className="mt-0">
+	                  {isLoading ? (
+	                    <ChartSkeleton />
+	                  ) : (
+                      <>
+                        <div className="mb-4 flex flex-wrap items-center gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Metric</span>
+                            <Select
+                              value={contributionMetric}
+                              onValueChange={(v) =>
+                                setContributionMetric(v as ContributionMetric)
+                              }
+                            >
+                              <SelectTrigger size="sm" className="w-[280px]">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="mean">Mean (contribs/user/day)</SelectItem>
+                                <SelectItem value="median">Median (contribs/user/day)</SelectItem>
+                                <SelectItem value="p25">P25 (contribs/user/day)</SelectItem>
+                                <SelectItem value="p75">P75 (contribs/user/day)</SelectItem>
+                                <SelectItem value="activeDayShare">Active-day share</SelectItem>
+                                <SelectItem value="contributionsPerActiveDay">
+                                  Contribs per active day
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Tier</span>
+                            <Select value={tier} onValueChange={(v) => setTier(v as TierOption)}>
+                              <SelectTrigger size="sm" className="w-[180px]">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="all">All users</SelectItem>
+                                <SelectItem value="top">Top</SelectItem>
+                                <SelectItem value="mid">Mid</SelectItem>
+                                <SelectItem value="casual">Casual</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        <TrendLineChart
+                          data={contributionChart.data}
+                          title={contributionChart.title}
+                          yAxisLabel={contributionChart.yAxisLabel}
+                          color={contributionChart.color}
+                          valueFormatter={contributionChart.valueFormatter}
+                        />
+                      </>
+	                  )}
+	                </TabsContent>
 
                 <TabsContent value="lines" className="mt-0">
                   {isLoading ? (

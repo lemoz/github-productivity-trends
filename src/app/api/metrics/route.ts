@@ -6,6 +6,52 @@ function endOfLastFullMonthUtc(now: Date) {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0, 23, 59, 59, 999));
 }
 
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+
+function ymFromDateUtc(date: Date) {
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}`;
+}
+
+function monthRange(ymStart: string, ymEnd: string) {
+  const [sy, sm] = ymStart.split("-").map(Number);
+  const [ey, em] = ymEnd.split("-").map(Number);
+  if (![sy, sm, ey, em].every(Number.isFinite)) {
+    throw new Error(`Invalid month range: ${ymStart}..${ymEnd}`);
+  }
+
+  const months: string[] = [];
+  let y = sy;
+  let m = sm;
+  while (y < ey || (y === ey && m <= em)) {
+    months.push(`${y}-${pad2(m)}`);
+    m += 1;
+    if (m === 13) {
+      m = 1;
+      y += 1;
+    }
+  }
+  return months;
+}
+
+function daysInMonthFromYm(ym: string) {
+  const [y, m] = ym.split("-").map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m)) return 30;
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+function percentile(sorted: number[], p: number) {
+  if (sorted.length === 0) return 0;
+  const clamped = Math.min(1, Math.max(0, p));
+  const k = (sorted.length - 1) * clamped;
+  const f = Math.floor(k);
+  const c = Math.min(sorted.length - 1, f + 1);
+  if (f === c) return sorted[f];
+  const d = k - f;
+  return sorted[f] * (1 - d) + sorted[c] * d;
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const startDate = searchParams.get("startDate");
@@ -13,42 +59,90 @@ export async function GET(request: Request) {
 
   try {
     const defaultEnd = endOfLastFullMonthUtc(new Date());
-    const dateFilter = {
-      gte: startDate ? new Date(startDate) : new Date("2020-01-01"),
-      lte: endDate ? new Date(endDate) : defaultEnd,
-    };
+    const start = startDate ? new Date(startDate) : new Date("2020-01-01");
+    const end = endDate ? new Date(endDate) : defaultEnd;
+    const dateFilter = { gte: start, lte: end };
+    const startMs = start.getTime();
+    const endMs = end.getTime();
 
-    // Get USER contribution data (this is the main metric we care about!)
-    const userContributions = await prisma.userContributionMetrics.findMany({
-      where: { date: dateFilter },
-      orderBy: { date: "asc" },
-    });
-
-    // Get REPO commit metrics as secondary data
-    const commitMetrics = await prisma.commitMetrics.findMany({
-      where: { date: dateFilter },
-      orderBy: { date: "asc" },
-    });
-
-    // Get PR and issue metrics for flow/quality signals
-    const prMetrics = await prisma.pRMetrics.findMany({
-      where: { date: dateFilter },
-      orderBy: { date: "asc" },
-    });
-
-    const issueMetrics = await prisma.issueMetrics.findMany({
-      where: { date: dateFilter },
-      orderBy: { date: "asc" },
-    });
-
-    // Get user and repo counts
-    const [userCount, repoCount] = await Promise.all([
+    const [
+      commitMetrics,
+      prMetrics,
+      issueMetrics,
+      userCount,
+      repoCount,
+      tierCountsRaw,
+      userAggByMonthRaw,
+      userAggByMonthTierRaw,
+      userMonthTotalsRaw,
+    ] = await Promise.all([
+      prisma.commitMetrics.findMany({
+        where: { date: dateFilter },
+        orderBy: { date: "asc" },
+      }),
+      prisma.pRMetrics.findMany({
+        where: { date: dateFilter },
+        orderBy: { date: "asc" },
+      }),
+      prisma.issueMetrics.findMany({
+        where: { date: dateFilter },
+        orderBy: { date: "asc" },
+      }),
       prisma.sampledUser.count(),
       prisma.sampledRepo.count(),
+      prisma.$queryRaw<{ tier: string; n: number }[]>`
+        SELECT tier as tier, COUNT(*) as n
+        FROM SampledUser
+        GROUP BY tier
+      `,
+      prisma.$queryRaw<
+        { ym: string; total: number | null; activeUserDays: number | null }[]
+      >`
+        SELECT
+          strftime('%Y-%m', datetime(date/1000, 'unixepoch')) as ym,
+          SUM(contributionCount) as total,
+          COUNT(*) as activeUserDays
+        FROM UserContributionMetrics
+        WHERE date >= ${startMs} AND date <= ${endMs}
+        GROUP BY ym
+        ORDER BY ym ASC
+      `,
+      prisma.$queryRaw<
+        {
+          ym: string;
+          tier: string;
+          total: number | null;
+          activeUserDays: number | null;
+        }[]
+      >`
+        SELECT
+          strftime('%Y-%m', datetime(m.date/1000, 'unixepoch')) as ym,
+          u.tier as tier,
+          SUM(m.contributionCount) as total,
+          COUNT(*) as activeUserDays
+        FROM UserContributionMetrics m
+        JOIN SampledUser u ON u.id = m.userId
+        WHERE m.date >= ${startMs} AND m.date <= ${endMs}
+        GROUP BY ym, tier
+        ORDER BY ym ASC
+      `,
+      prisma.$queryRaw<
+        { ym: string; userId: string; tier: string; total: number | null }[]
+      >`
+        SELECT
+          strftime('%Y-%m', datetime(m.date/1000, 'unixepoch')) as ym,
+          m.userId as userId,
+          u.tier as tier,
+          SUM(m.contributionCount) as total
+        FROM UserContributionMetrics m
+        JOIN SampledUser u ON u.id = m.userId
+        WHERE m.date >= ${startMs} AND m.date <= ${endMs}
+        GROUP BY ym, userId, tier
+      `,
     ]);
 
     // Check if we have any data
-    const hasUserData = userContributions.length > 0;
+    const hasUserData = userAggByMonthRaw.length > 0;
     const hasRepoData =
       commitMetrics.length > 0 || prMetrics.length > 0 || issueMetrics.length > 0;
 
@@ -60,8 +154,158 @@ export async function GET(request: Request) {
       });
     }
 
-    // Aggregate USER contributions by month (PRIMARY metric for productivity)
-    const userMonthlyData = aggregateUserContributionsByMonth(userContributions, userCount);
+    const tierCounts: Record<string, number> = {};
+    for (const row of tierCountsRaw) {
+      tierCounts[row.tier] = Number(row.n || 0);
+    }
+
+    const startYm = ymFromDateUtc(start);
+    const endYm = ymFromDateUtc(end);
+    const months = monthRange(startYm, endYm);
+
+    const daysByYm = new Map<string, number>();
+    for (const ym of months) {
+      daysByYm.set(ym, daysInMonthFromYm(ym));
+    }
+
+    const userAggByMonth = new Map<string, { total: number; activeUserDays: number }>();
+    for (const row of userAggByMonthRaw) {
+      userAggByMonth.set(row.ym, {
+        total: Number(row.total || 0),
+        activeUserDays: Number(row.activeUserDays || 0),
+      });
+    }
+
+    const userAggByMonthTier = new Map<
+      string,
+      Map<string, { total: number; activeUserDays: number }>
+    >();
+    for (const row of userAggByMonthTierRaw) {
+      const ym = row.ym;
+      const tierMap =
+        userAggByMonthTier.get(ym) ||
+        (() => {
+          const created = new Map<string, { total: number; activeUserDays: number }>();
+          userAggByMonthTier.set(ym, created);
+          return created;
+        })();
+
+      tierMap.set(row.tier, {
+        total: Number(row.total || 0),
+        activeUserDays: Number(row.activeUserDays || 0),
+      });
+    }
+
+    const perUserValuesByMonth = new Map<string, number[]>();
+    const perTierValuesByMonth = new Map<string, Map<string, number[]>>();
+
+    for (const row of userMonthTotalsRaw) {
+      const ym = row.ym;
+      const days = daysByYm.get(ym) ?? 30;
+      const value = days > 0 ? Number(row.total || 0) / days : 0;
+
+      const overall = perUserValuesByMonth.get(ym) || [];
+      overall.push(value);
+      perUserValuesByMonth.set(ym, overall);
+
+      const tierMap =
+        perTierValuesByMonth.get(ym) ||
+        (() => {
+          const created = new Map<string, number[]>();
+          perTierValuesByMonth.set(ym, created);
+          return created;
+        })();
+
+      const tierValues = tierMap.get(row.tier) || [];
+      tierValues.push(value);
+      tierMap.set(row.tier, tierValues);
+    }
+
+    const computeQuantiles = (activeValues: number[], population: number) => {
+      const missing = Math.max(0, population - activeValues.length);
+      const sorted = activeValues.slice().sort((a, b) => a - b);
+      const padded = missing > 0 ? new Array(missing).fill(0).concat(sorted) : sorted;
+      return {
+        p25: percentile(padded, 0.25),
+        p50: percentile(padded, 0.5),
+        p75: percentile(padded, 0.75),
+      };
+    };
+
+    const userMonthlyContributions = months.map((ym) => {
+      const days = daysByYm.get(ym) ?? 30;
+      const agg = userAggByMonth.get(ym) || { total: 0, activeUserDays: 0 };
+      const total = agg.total;
+
+      const byTier: Record<string, number> = {};
+      const byTierP25: Record<string, number> = {};
+      const byTierP50: Record<string, number> = {};
+      const byTierP75: Record<string, number> = {};
+
+      const tierAgg = userAggByMonthTier.get(ym);
+      for (const [tier, users] of Object.entries(tierCounts)) {
+        const tAgg = tierAgg?.get(tier) || { total: 0, activeUserDays: 0 };
+        byTier[tier] = users > 0 && days > 0 ? tAgg.total / (users * days) : 0;
+
+        const tierActiveValues = perTierValuesByMonth.get(ym)?.get(tier) || [];
+        const tierQuantiles = computeQuantiles(tierActiveValues, users);
+        byTierP25[tier] = tierQuantiles.p25;
+        byTierP50[tier] = tierQuantiles.p50;
+        byTierP75[tier] = tierQuantiles.p75;
+      }
+
+      const activeValues = perUserValuesByMonth.get(ym) || [];
+      const overallQuantiles = computeQuantiles(activeValues, userCount);
+
+      return {
+        date: `${ym}-01`,
+        value: userCount > 0 && days > 0 ? total / (userCount * days) : 0,
+        byTier,
+        p25: overallQuantiles.p25,
+        p50: overallQuantiles.p50,
+        p75: overallQuantiles.p75,
+        byTierP25,
+        byTierP50,
+        byTierP75,
+      };
+    });
+
+    const userMonthlyActiveDayShare = months.map((ym) => {
+      const days = daysByYm.get(ym) ?? 30;
+      const agg = userAggByMonth.get(ym) || { total: 0, activeUserDays: 0 };
+      const denom = userCount > 0 && days > 0 ? userCount * days : 0;
+
+      const byTier: Record<string, number> = {};
+      const tierAgg = userAggByMonthTier.get(ym);
+      for (const [tier, users] of Object.entries(tierCounts)) {
+        const tAgg = tierAgg?.get(tier) || { total: 0, activeUserDays: 0 };
+        const tDenom = users > 0 && days > 0 ? users * days : 0;
+        byTier[tier] = tDenom > 0 ? tAgg.activeUserDays / tDenom : 0;
+      }
+
+      return {
+        date: `${ym}-01`,
+        value: denom > 0 ? agg.activeUserDays / denom : 0,
+        byTier,
+      };
+    });
+
+    const userMonthlyContribsPerActiveDay = months.map((ym) => {
+      const agg = userAggByMonth.get(ym) || { total: 0, activeUserDays: 0 };
+      const total = agg.total;
+      const byTier: Record<string, number> = {};
+      const tierAgg = userAggByMonthTier.get(ym);
+      for (const [tier] of Object.entries(tierCounts)) {
+        const tAgg = tierAgg?.get(tier) || { total: 0, activeUserDays: 0 };
+        byTier[tier] = tAgg.activeUserDays > 0 ? tAgg.total / tAgg.activeUserDays : 0;
+      }
+
+      return {
+        date: `${ym}-01`,
+        value: agg.activeUserDays > 0 ? total / agg.activeUserDays : 0,
+        byTier,
+      };
+    });
 
     // Aggregate REPO metrics by month (secondary - for lines of code)
     const repoMonthlyData = aggregateRepoMetricsByMonth(commitMetrics);
@@ -70,7 +314,10 @@ export async function GET(request: Request) {
     const issueMonthlyData = aggregateIssueMetricsByMonth(issueMetrics);
 
     // Calculate summary from USER contribution data
-    const totalUserContributions = userContributions.reduce((sum, m) => sum + m.contributionCount, 0);
+    const totalUserContributions = Array.from(userAggByMonth.values()).reduce(
+      (sum, m) => sum + m.total,
+      0
+    );
     const totalRepoCommits = commitMetrics.reduce((sum, m) => sum + m.commitCount, 0);
     const totalLinesAdded = commitMetrics.reduce((sum, m) => sum + m.linesAdded, 0);
     const totalLinesRemoved = commitMetrics.reduce((sum, m) => sum + m.linesRemoved, 0);
@@ -94,9 +341,11 @@ export async function GET(request: Request) {
       totalIssuesClosed > 0 ? weightedResolutionHours / totalIssuesClosed : null;
 
     // Average contributions per user per calendar-day (includes inactive days)
-    const avgContributionsPerUserPerDay = userMonthlyData.length > 0
-      ? userMonthlyData.reduce((sum, m) => sum + m.avgContributionsPerUserPerDay, 0) / userMonthlyData.length
-      : 0;
+    const avgContributionsPerUserPerDay =
+      userMonthlyContributions.length > 0
+        ? userMonthlyContributions.reduce((sum, m) => sum + m.value, 0) /
+          userMonthlyContributions.length
+        : 0;
 
     const summary: GlobalMetrics = {
       totalCommits: totalUserContributions, // User contributions is primary
@@ -113,13 +362,13 @@ export async function GET(request: Request) {
       activeUsers: userCount,
       activeRepos: repoCount,
       periodStart:
-        userMonthlyData[0]?.date ||
+        userMonthlyContributions[0]?.date ||
         repoMonthlyData[0]?.date ||
         prMonthlyData[0]?.date ||
         issueMonthlyData[0]?.date ||
         "",
       periodEnd:
-        userMonthlyData[userMonthlyData.length - 1]?.date ||
+        userMonthlyContributions[userMonthlyContributions.length - 1]?.date ||
         repoMonthlyData[repoMonthlyData.length - 1]?.date ||
         prMonthlyData[prMonthlyData.length - 1]?.date ||
         issueMonthlyData[issueMonthlyData.length - 1]?.date ||
@@ -129,10 +378,9 @@ export async function GET(request: Request) {
     // Build trend data - USER contributions for commits, REPO data for lines
     const trends: TrendData = {
       // User productivity - avg contributions per user per day
-      commits: userMonthlyData.map((m) => ({
-        date: m.date,
-        value: m.avgContributionsPerUserPerDay,
-      })),
+      commits: userMonthlyContributions,
+      activeDayShare: userMonthlyActiveDayShare,
+      contributionsPerActiveDay: userMonthlyContribsPerActiveDay,
       // Lines of code from repo stats
       linesOfCode: repoMonthlyData.map((m) => ({
         date: m.date,
@@ -153,7 +401,7 @@ export async function GET(request: Request) {
       trends,
       dataSource: "real",
       dataCounts: {
-        userContributions: userContributions.length,
+        userContributions: userMonthTotalsRaw.length,
         repoCommits: commitMetrics.length,
         repoPRDays: prMetrics.length,
         repoIssueDays: issueMetrics.length,
@@ -166,46 +414,6 @@ export async function GET(request: Request) {
       { status: 500 }
     );
   }
-}
-
-// Aggregate USER contribution data by month - calculate avg contributions per user per day
-function aggregateUserContributionsByMonth(
-  contributions: Array<{
-    date: Date;
-    userId: string;
-    contributionCount: number;
-  }>,
-  totalUserCount: number
-): Array<{ date: string; avgContributionsPerUserPerDay: number }> {
-  // Group by month, tracking total contributions
-  const monthMap = new Map<string, number>();
-
-  for (const c of contributions) {
-    const monthKey = c.date.toISOString().slice(0, 7); // YYYY-MM
-    monthMap.set(monthKey, (monthMap.get(monthKey) || 0) + c.contributionCount);
-  }
-
-  const result: Array<{ date: string; avgContributionsPerUserPerDay: number }> = [];
-  for (const [month, totalContributions] of monthMap.entries()) {
-    const [yearStr, monthStr] = month.split("-");
-    const year = Number(yearStr);
-    const monthNum = Number(monthStr); // 1-based
-    const daysInMonth = Number.isFinite(year) && Number.isFinite(monthNum)
-      ? new Date(year, monthNum, 0).getDate()
-      : 30;
-
-    const avgContributionsPerUserPerDay =
-      totalUserCount > 0 && daysInMonth > 0
-        ? totalContributions / (totalUserCount * daysInMonth)
-        : 0;
-
-    result.push({
-      date: `${month}-01`,
-      avgContributionsPerUserPerDay,
-    });
-  }
-
-  return result.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 // Aggregate REPO commit data by month (for lines of code metrics)
@@ -321,6 +529,8 @@ function getEmptySummary(): GlobalMetrics {
 function getEmptyTrends(): TrendData {
   return {
     commits: [],
+    activeDayShare: [],
+    contributionsPerActiveDay: [],
     linesOfCode: [],
     prMergeTime: [],
     issueResolution: [],
