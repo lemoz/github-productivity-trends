@@ -525,7 +525,10 @@ export async function getRepoReadme(owner: string, repo: string) {
     cacheKey,
     async () => {
       try {
-        const response = await octokit.repos.getReadme({ owner, repo });
+        const response = await withRetries(
+          () => octokit.repos.getReadme({ owner, repo }),
+          `rest:readme:${owner}/${repo}`
+        );
 
         rateLimiter.updateFromHeaders(
           response.headers as Record<string, string>,
@@ -554,11 +557,15 @@ export async function listRepoRootFiles(owner: string, repo: string) {
     cacheKey,
     async () => {
       try {
-        const response = await octokit.repos.getContent({
-          owner,
-          repo,
-          path: "",
-        });
+        const response = await withRetries(
+          () =>
+            octokit.repos.getContent({
+              owner,
+              repo,
+              path: "",
+            }),
+          `rest:contents:${owner}/${repo}:root`
+        );
 
         rateLimiter.updateFromHeaders(
           response.headers as Record<string, string>,
@@ -586,11 +593,15 @@ export async function listRepoDirFiles(owner: string, repo: string, path: string
     cacheKey,
     async () => {
       try {
-        const response = await octokit.repos.getContent({
-          owner,
-          repo,
-          path,
-        });
+        const response = await withRetries(
+          () =>
+            octokit.repos.getContent({
+              owner,
+              repo,
+              path,
+            }),
+          `rest:contents:${owner}/${repo}:${path}`
+        );
 
         rateLimiter.updateFromHeaders(
           response.headers as Record<string, string>,

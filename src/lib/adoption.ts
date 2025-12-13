@@ -229,7 +229,7 @@ export async function syncAISignals(options?: {
             source: "pr_text",
             seenAt,
             occurrences: match.count,
-            examples: [pr.title].filter(Boolean),
+            examples: pr.title ? [pr.title] : undefined,
             repoId: repo.id,
             userId: authorId,
           });
