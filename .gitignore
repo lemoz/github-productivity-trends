@@ -46,3 +46,6 @@ next-env.d.ts
 
 # prisma local sqlite
 prisma/*.db
+
+# derived analysis artifacts (exported locally)
+analysis/*.csv

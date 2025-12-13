@@ -2,15 +2,20 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { GlobalMetrics, TrendData } from "@/types/metrics";
 
+function endOfLastFullMonthUtc(now: Date) {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0, 23, 59, 59, 999));
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const startDate = searchParams.get("startDate");
   const endDate = searchParams.get("endDate");
 
   try {
+    const defaultEnd = endOfLastFullMonthUtc(new Date());
     const dateFilter = {
       gte: startDate ? new Date(startDate) : new Date("2020-01-01"),
-      lte: endDate ? new Date(endDate) : new Date(),
+      lte: endDate ? new Date(endDate) : defaultEnd,
     };
 
     // Get USER contribution data (this is the main metric we care about!)
